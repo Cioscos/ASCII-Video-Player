@@ -1,10 +1,14 @@
+import queue
 import cv2
 import numpy as np
 import argparse
 import time
-import signal
+import logging
 from PIL import Image
 from multiprocessing import Process, Queue
+
+# Configura il logging su file
+logging.basicConfig(filename="ascii_video.log", level=logging.INFO, format="%(asctime)s - %(message)s", filemode='w')
 
 
 ASCII_CHARS = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
@@ -59,21 +63,55 @@ def extract_frames(video_path, frame_queue, fps):
         frame_queue.put(None)  # Segnala la fine
 
 
-def process_frames(frame_queue, new_width):
-    """ Prende i frame dalla coda e li converte in ASCII """
+def process_frames(frame_queue, new_width, log_fps):
+    frame_count = 0  # Contatore globale dei frame
+    fps_frame_count = 0  # Contatore per calcolare gli FPS
+    start_time = time.time()
+
     try:
         while True:
             try:
-                frame = frame_queue.get(timeout=1)  # Previene blocco infinito
+                frame = frame_queue.get(timeout=1)
             except queue.Empty:
                 continue
-
             if frame is None:
                 break
 
+            # Tempo di inizio conversione
+            conversion_start_time = time.time()
+
             ascii_frame = frame_to_ascii(frame, new_width)
+
+            # Tempo di fine conversione
+            conversion_end_time = time.time()
+            conversion_time = conversion_end_time - conversion_start_time
+
+            # Tempo di inizio stampa
+            print_start_time = time.time()
+
             print("\033[H\033[J", end="")  # Pulisce lo schermo
             print(ascii_frame)
+
+            # Tempo di fine stampa
+            print_end_time = time.time()
+            print_time = print_end_time - print_start_time
+
+            # Log del tempo di elaborazione nel file
+            logging.info(f"Frame {frame_count} - Tempo conversione: {conversion_time:.4f} sec - Tempo stampa: {print_time:.4f} sec")
+
+            # Incrementiamo il contatore dei frame totali
+            frame_count += 1
+            fps_frame_count += 1
+
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+
+            if elapsed_time >= 1.0:  # Stampa ogni secondo
+                if log_fps:
+                    print(f"\033[92m[LOG] FPS EFFETTIVI: {fps_frame_count}\033[0m")
+                fps_frame_count = 0  # Reset del contatore FPS
+                start_time = current_time
+
     except KeyboardInterrupt:
         print("\n[!] Interruzione ricevuta: terminazione del processo di elaborazione frame.")
 
@@ -83,11 +121,13 @@ def main():
     parser.add_argument("video_path", type=str, help="Path to the video file")
     parser.add_argument("width", type=int, help="Width of the ASCII output")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second (default: 10)")
+    parser.add_argument("--log_fps", action="store_true", help="Enable logging of actual FPS")
+
     args = parser.parse_args()
     frame_queue = Queue(maxsize=10)
 
     extractor_process = Process(target=extract_frames, args=(args.video_path, frame_queue, args.fps))
-    processor_process = Process(target=process_frames, args=(frame_queue, args.width))
+    processor_process = Process(target=process_frames, args=(frame_queue, args.width, args.log_fps))
 
     extractor_process.start()
     processor_process.start()
