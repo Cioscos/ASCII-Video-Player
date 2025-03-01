@@ -13,7 +13,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.controls import FormattedTextControl
 
-# Configura il logging
+# Configura il logging: salverà i tempi in ms per conversione e stampa.
 logging.basicConfig(
     filename="ascii_video.log",
     level=logging.INFO,
@@ -25,23 +25,26 @@ ASCII_CHARS = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&
 
 
 def frame_to_ascii(frame_data):
-    """Converte un frame in ASCII a colori usando operazioni vettoriali con NumPy.
-       frame_data è una tupla (frame, new_width)."""
+    """
+    Converte un frame in ASCII a colori.
+    frame_data: tupla (frame, new_width)
+    Restituisce una stringa con il frame in ASCII (con escape ANSI).
+    """
     frame, new_width = frame_data
     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     width, height = image.size
     aspect_ratio = height / width
     new_height = int(aspect_ratio * new_width * 0.5)
     image = image.resize((new_width, new_height))
-    pixels = np.array(image)  # (new_height, new_width, 3)
+    pixels = np.array(image)  # Shape: (new_height, new_width, 3)
 
     # Calcola la luminosità (media dei canali RGB)
     brightness = np.mean(pixels, axis=2).astype(int)
-    # Mappa la luminosità a indici del set di caratteri
+    # Mappa la luminosità in indici del set di caratteri
     char_indices = (brightness * (len(ASCII_CHARS) - 1) // 255).astype(int)
     ascii_chars = np.vectorize(lambda x: ASCII_CHARS[x])(char_indices)
 
-    # Funzione per applicare il colore ANSI
+    # Funzione per applicare il colore ANSI a un carattere
     def colorize(r, g, b, char):
         return f"\033[38;2;{r};{g};{b}m{char}\033[0m"
 
@@ -55,7 +58,10 @@ def frame_to_ascii(frame_data):
 
 
 def extract_frames(video_path, frame_queue, fps):
-    """Estrae i frame dal video e li mette nella coda."""
+    """
+    Estrae i frame dal video e li inserisce nella coda.
+    In caso di fine video o interruzione, inserisce None per segnalare la fine.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print("Errore: impossibile aprire il video.")
@@ -75,13 +81,11 @@ def extract_frames(video_path, frame_queue, fps):
         frame_queue.put(None)  # Segnala la fine
 
 
-def update_frames(frame_queue, new_width, app, control, log_fps, pool, stop_event, batch_size=2):
+def update_frames(frame_queue, new_width, app, control, pool, stop_event, batch_size=2, log_fps=False, log_metrics=False):
     """
-    Thread di aggiornamento:
-      - Legge un batch di frame dalla coda.
-      - Converte i frame in ASCII in parallelo tramite il pool.
-      - Aggiorna il display.
-    Il batch_size può essere ridotto (es. a 1 o 2) per aggiornamenti più fluidi.
+    Legge un batch di frame dalla coda, converte i frame in ASCII in parallelo e aggiorna il display.
+    Misura il tempo medio (in ms) di conversione per frame e il tempo per aggiornare il display.
+    batch_size: numero di frame processati insieme (puoi sperimentare con 1, 2 o 3).
     """
     frame_count = 0
     fps_count = 0
@@ -102,24 +106,31 @@ def update_frames(frame_queue, new_width, app, control, log_fps, pool, stop_even
         if not frames:
             continue
 
+        # Misura il tempo di conversione in batch (in ms per frame)
+        conv_start = time.time()
         try:
-            # Utilizza map_async per evitare blocchi lunghi e per poter gestire il caso di terminazione
             async_result = pool.map_async(frame_to_ascii, frames, chunksize=1)
             ascii_frames = async_result.get(timeout=1)
         except Exception as e:
-            # Se il pool non è in esecuzione o c'è un timeout, esce dal loop
             break
+        conv_end = time.time()
+        conversion_time_ms = ((conv_end - conv_start) * 1000) / len(frames)
 
-        # Per ogni frame convertito, aggiorna il display (qui mostriamo l'ultimo frame del batch)
-        # Se vuoi aggiornare per ogni frame, potresti ciclare e aggiungere un breve delay.
-        if ascii_frames:
-            control.text = ANSI(ascii_frames[-1])
-            app.invalidate()
+        # Misura il tempo di aggiornamento del display (stampa)
+        print_start = time.time()
+        # Per aggiornare il display usiamo l'ultimo frame del batch
+        control.text = ANSI(ascii_frames[-1])
+        app.invalidate()
+        print_end = time.time()
+        printing_time_ms = (print_end - print_start) * 1000
 
-        for _ in ascii_frames:
-            logging.info(f"Frame {frame_count} - Conversione completata")
-            frame_count += 1
-            fps_count += 1
+        # Logga i tempi medi per ogni frame del batch
+        if log_metrics:
+            for _ in ascii_frames:
+                logging.info(
+                    f"Frame {frame_count} - Conversione: {conversion_time_ms:.2f} ms - Stampa: {printing_time_ms:.2f} ms")
+                frame_count += 1
+                fps_count += 1
 
         now = time.time()
         if now - fps_start >= 1.0:
@@ -130,22 +141,26 @@ def update_frames(frame_queue, new_width, app, control, log_fps, pool, stop_even
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Real-time ASCII video using prompt_toolkit and multiprocessing.")
+    parser = argparse.ArgumentParser(
+        description="Real-time ASCII video using prompt_toolkit and multiprocessing."
+    )
     parser.add_argument("video_path", type=str, help="Path to the video file")
     parser.add_argument("width", type=int, help="Width of the ASCII output")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second (default: 10)")
     parser.add_argument("--log_fps", action="store_true", help="Enable logging of actual FPS")
+    parser.add_argument("--log_performance", action="store_true", help="Enable logging of performance metrics")
+    parser.add_argument("--batch_size", type=int, default=1, help="Number of processes to use (default: 1)")
     args = parser.parse_args()
 
-    # Imposta la coda con maxsize uguale agli fps
+    # Imposta la coda: maxsize = fps (o puoi sperimentare un valore leggermente maggiore)
     frame_queue = Queue(maxsize=args.fps)
 
     extractor_process = Process(target=extract_frames, args=(args.video_path, frame_queue, args.fps))
     extractor_process.start()
 
-    pool = Pool(processes=cpu_count())  # Usa tutti i core disponibili
+    pool = Pool(processes=cpu_count())
 
-    # Definisci key bindings per uscire con 'q' o Ctrl+C
+    # Definisci i key bindings: 'q' o Ctrl+C per uscire.
     kb = KeyBindings()
 
     @kb.add("q")
@@ -162,12 +177,12 @@ def main():
 
     app = Application(layout=layout, key_bindings=kb, full_screen=True)
 
-    # Flag di terminazione per il thread di aggiornamento
+    # Flag per la terminazione pulita del thread di aggiornamento
     stop_event = threading.Event()
 
     updater_thread = threading.Thread(
         target=update_frames,
-        args=(frame_queue, args.width, app, control, args.log_fps, pool, stop_event),
+        args=(frame_queue, args.width, app, control, pool, stop_event, args.batch_size, args.log_fps, args.log_performance),
         daemon=True
     )
     updater_thread.start()
@@ -177,7 +192,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        stop_event.set()  # Segnala al thread di uscire
+        stop_event.set()
         updater_thread.join(timeout=1)
         pool.close()
         pool.join()
