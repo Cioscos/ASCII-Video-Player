@@ -4,6 +4,7 @@ import numpy as np
 import argparse
 import time
 import logging
+import sys
 from PIL import Image
 from multiprocessing import Process, Queue
 
@@ -14,13 +15,8 @@ logging.basicConfig(filename="ascii_video.log", level=logging.INFO, format="%(as
 ASCII_CHARS = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
 
 
-def rgb_to_ansi(r, g, b):
-    """ Restituisce un codice ANSI per i colori """
-    return f"\033[38;2;{r};{g};{b}m"
-
-
 def frame_to_ascii(frame, new_width):
-    """ Converte un frame OpenCV in ASCII colorato """
+    """Converte un frame in ASCII a colori in modo più efficiente con NumPy, evitando cicli nidificati."""
     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     width, height = image.size
     aspect_ratio = height / width
@@ -29,16 +25,25 @@ def frame_to_ascii(frame, new_width):
     image = image.resize((new_width, new_height))
     pixels = np.array(image)
 
-    ascii_frame = ""
-    for row in pixels:
-        for r, g, b in row:
-            r, g, b = int(r), int(g), int(b)
-            brightness = (r + g + b) // 3
-            char = ASCII_CHARS[brightness * (len(ASCII_CHARS) - 1) // 255]
-            ascii_frame += f"{rgb_to_ansi(r, g, b)}{char}"
-        ascii_frame += "\033[0m\n"
+    # Calcoliamo la luminosità in parallelo con NumPy
+    brightness = np.mean(pixels, axis=2).astype(int)
 
-    return ascii_frame
+    # Convertiamo la luminosità in caratteri ASCII in modo vettoriale
+    char_indices = (brightness * (len(ASCII_CHARS) - 1) // 255).astype(int)
+    ascii_chars = np.vectorize(lambda x: ASCII_CHARS[x])(char_indices)
+
+    # Funzione vettorializzata per applicare il colore ANSI senza cicli annidati
+    def colorize(r, g, b, char):
+        return f"\033[38;2;{r};{g};{b}m{char}\033[0m"
+
+    # Applichiamo i colori ANSI a tutta la matrice in un'unica operazione
+    vectorized_colorize = np.vectorize(colorize)
+    color_ascii = vectorized_colorize(pixels[:, :, 0], pixels[:, :, 1], pixels[:, :, 2], ascii_chars)
+
+    # Combiniamo le righe in una stringa unica per l'output
+    ascii_str = "\n".join("".join(row) for row in color_ascii)
+
+    return ascii_str
 
 
 def extract_frames(video_path, frame_queue, fps):
@@ -89,8 +94,12 @@ def process_frames(frame_queue, new_width, log_fps):
             # Tempo di inizio stampa
             print_start_time = time.time()
 
-            print("\033[H\033[J", end="")  # Pulisce lo schermo
-            print(ascii_frame)
+            # print("\033[H\033[J", end="")  # Pulisce lo schermo
+            # print(ascii_frame)
+
+            # Stampa ottimizzata
+            sys.stdout.write("\033[H\033[J" + ascii_frame + "\n")
+            sys.stdout.flush()  # Forza la stampa immediata senza buffering
 
             # Tempo di fine stampa
             print_end_time = time.time()
