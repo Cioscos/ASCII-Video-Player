@@ -5,15 +5,17 @@ import argparse
 import time
 import logging
 import threading
-from PIL import Image
+import sys
 from multiprocessing import Process, Queue, Pool, cpu_count
+from multiprocessing.dummy import Pool as ThreadPool  # Pool basato su thread (utile su Windows)
+
+# Importa prompt_toolkit solo se necessario
 from prompt_toolkit import Application
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout.controls import FormattedTextControl
 
-# Configura il logging: salverà i tempi in ms per conversione e stampa.
+# Configurazione del logging per salvare i tempi (in ms) di conversione e stampa.
 logging.basicConfig(
     filename="ascii_video.log",
     level=logging.INFO,
@@ -21,46 +23,72 @@ logging.basicConfig(
     filemode='w'
 )
 
+# Stringa dei caratteri ASCII ordinati per densità (dal più chiaro al più scuro).
 ASCII_CHARS = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+# Precompone una Look-Up Table (LUT) per mappare un valore di luminosità (0-255) in un carattere ASCII.
+ASCII_LUT = np.array(list(ASCII_CHARS))
 
 
 def frame_to_ascii(frame_data):
     """
-    Converte un frame in ASCII a colori.
-    frame_data: tupla (frame, new_width)
-    Restituisce una stringa con il frame in ASCII (con escape ANSI).
+    Converte un frame video in una stringa ASCII a colori usando operazioni vettorializzate.
+
+    Parametri:
+        frame_data (tuple): (frame, new_width) dove:
+            - frame: array NumPy contenente il frame (in formato BGR).
+            - new_width (int): larghezza desiderata dell'output ASCII.
+
+    Ritorna:
+        str: stringa contenente il frame convertito in ASCII con escape ANSI.
     """
     frame, new_width = frame_data
-    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    width, height = image.size
+    height, width = frame.shape[:2]
     aspect_ratio = height / width
     new_height = int(aspect_ratio * new_width * 0.5)
-    image = image.resize((new_width, new_height))
-    pixels = np.array(image)  # Shape: (new_height, new_width, 3)
 
-    # Calcola la luminosità (media dei canali RGB)
-    brightness = np.mean(pixels, axis=2).astype(int)
-    # Mappa la luminosità in indici del set di caratteri
-    char_indices = (brightness * (len(ASCII_CHARS) - 1) // 255).astype(int)
-    ascii_chars = np.vectorize(lambda x: ASCII_CHARS[x])(char_indices)
+    # Ridimensiona il frame (operazione eseguita in C)
+    resized = cv2.resize(frame, (new_width, new_height))
+    # Converte il frame da BGR a RGB
+    rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-    # Funzione per applicare il colore ANSI a un carattere
-    def colorize(r, g, b, char):
-        return f"\033[38;2;{r};{g};{b}m{char}\033[0m"
+    # Calcola la luminosità come media dei canali RGB
+    brightness = np.mean(rgb_frame, axis=2).astype(np.uint8)
+    # Mappa la luminosità in un indice per la LUT
+    char_indices = (brightness.astype(np.uint16) * (len(ASCII_CHARS) - 1) // 255).astype(np.uint8)
+    ascii_chars = ASCII_LUT[char_indices]
 
-    vectorized_colorize = np.vectorize(colorize)
-    color_ascii = vectorized_colorize(
-        pixels[:, :, 0], pixels[:, :, 1], pixels[:, :, 2], ascii_chars
-    )
+    # Converte ciascun canale RGB in stringa
+    r_str = np.char.mod("%d", rgb_frame[:, :, 0])
+    g_str = np.char.mod("%d", rgb_frame[:, :, 1])
+    b_str = np.char.mod("%d", rgb_frame[:, :, 2])
 
-    ascii_str = "\n".join("".join(row) for row in color_ascii)
+    # Costruisce la stringa ANSI per ciascun pixel:
+    # Formato: "\033[38;2;{r};{g};{b}m{char}\033[0m"
+    prefix = "\033[38;2;"
+    mid = "m"
+    suffix = "\033[0m"
+    ansi = np.char.add(prefix, r_str)
+    ansi = np.char.add(ansi, ";")
+    ansi = np.char.add(ansi, g_str)
+    ansi = np.char.add(ansi, ";")
+    ansi = np.char.add(ansi, b_str)
+    ansi = np.char.add(ansi, mid)
+    ansi = np.char.add(ansi, ascii_chars)
+    ansi = np.char.add(ansi, suffix)
+
+    # Unisce le righe per ottenere la stringa finale
+    ascii_str = "\n".join("".join(row) for row in ansi)
     return ascii_str
 
 
-def extract_frames(video_path, frame_queue, fps):
+def extract_frames(video_path, raw_queue, fps):
     """
-    Estrae i frame dal video e li inserisce nella coda.
-    In caso di fine video o interruzione, inserisce None per segnalare la fine.
+    Estrae i frame da un video e li inserisce nella coda raw_queue.
+
+    Parametri:
+        video_path (str): percorso del file video.
+        raw_queue (Queue): coda per passare i frame grezzi.
+        fps (int): numero di frame al secondo da estrarre.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -72,135 +100,240 @@ def extract_frames(video_path, frame_queue, fps):
             ret, frame = cap.read()
             if not ret:
                 break
-            frame_queue.put(frame)
+            raw_queue.put(frame)
             time.sleep(frame_time)
     except KeyboardInterrupt:
-        print("\n[!] Interruzione nel processo di estrazione frame.")
+        print("\n[!] Interruzione nell'estrazione dei frame.")
     finally:
         cap.release()
-        frame_queue.put(None)  # Segnala la fine
+        raw_queue.put(None)  # Segnala la fine dello stream
 
 
-def update_frames(frame_queue, new_width, app, control, pool, stop_event, batch_size=2, log_fps=False, log_metrics=False):
+def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_event, log_metrics=False):
     """
-    Legge un batch di frame dalla coda, converte i frame in ASCII in parallelo e aggiorna il display.
-    Misura il tempo medio (in ms) di conversione per frame e il tempo per aggiornare il display.
-    batch_size: numero di frame processati insieme (puoi sperimentare con 1, 2 o 3).
+    Legge i frame grezzi dalla raw_queue, li elabora in batch con un pool parallelo
+    e mette i frame ASCII risultanti nella ascii_queue.
+
+    Parametri:
+        raw_queue (Queue): coda dei frame grezzi.
+        ascii_queue (Queue): coda dei frame convertiti in ASCII.
+        pool (Pool): pool di processi o thread per la conversione.
+        batch_size (int): numero di frame da elaborare insieme.
+        new_width (int): larghezza desiderata per l'output ASCII.
+        stop_event (threading.Event): evento per terminare il ciclo.
+        log_metrics (bool): se True, logga i tempi di conversione per frame.
     """
     frame_count = 0
-    fps_count = 0
-    fps_start = time.time()
-
     while not stop_event.is_set():
-        frames = []
+        batch = []
         for _ in range(batch_size):
             try:
-                frame = frame_queue.get(timeout=0.05)
+                frame = raw_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
             if frame is None:
                 stop_event.set()
                 break
-            frames.append((frame, new_width))
+            batch.append((frame, new_width))
 
-        if not frames:
+        if not batch:
             continue
 
-        # Misura il tempo di conversione in batch (in ms per frame)
         conv_start = time.time()
         try:
-            async_result = pool.map_async(frame_to_ascii, frames, chunksize=1)
-            ascii_frames = async_result.get(timeout=1)
+            ascii_frames = pool.map(frame_to_ascii, batch, chunksize=len(batch))
         except Exception as e:
+            print("Errore durante la conversione dei frame:", e)
             break
         conv_end = time.time()
-        conversion_time_ms = ((conv_end - conv_start) * 1000) / len(frames)
+        conversion_time_ms = ((conv_end - conv_start) * 1000) / len(batch)
+        if log_metrics:
+            for _ in ascii_frames:
+                logging.info(f"Frame {frame_count} - Conversione: {conversion_time_ms:.2f} ms")
+                frame_count += 1
 
-        # Misura il tempo di aggiornamento del display (stampa)
+        # Inserisce ogni frame ASCII nella coda per il rendering.
+        for af in ascii_frames:
+            ascii_queue.put(af)
+
+
+def render_frames_ptk(ascii_queue, app, control, stop_event, log_fps=False, log_performance=False):
+    """
+    Legge i frame ASCII dalla ascii_queue e aggiorna il display utilizzando prompt_toolkit.
+    Misura e logga anche il tempo impiegato per stampare i caratteri.
+
+    Parametri:
+        ascii_queue (Queue): coda dei frame ASCII.
+        app (Application): applicazione prompt_toolkit.
+        control (FormattedTextControl): controllo che mostra il testo.
+        stop_event (threading.Event): evento per terminare il ciclo.
+        log_fps (bool): se True, logga gli aggiornamenti del display al secondo.
+        log_performance (bool): se True, logga il tempo impiegato per la stampa.
+    """
+    fps_count = 0
+    fps_start = time.time()
+    while not stop_event.is_set():
+        try:
+            ascii_frame = ascii_queue.get(timeout=0.05)
+        except queue.Empty:
+            continue
         print_start = time.time()
-        # Per aggiornare il display usiamo l'ultimo frame del batch
-        control.text = ANSI(ascii_frames[-1])
+        control.text = ANSI(ascii_frame)
         app.invalidate()
         print_end = time.time()
         printing_time_ms = (print_end - print_start) * 1000
 
-        # Logga i tempi medi per ogni frame del batch
-        if log_metrics:
-            for _ in ascii_frames:
-                logging.info(
-                    f"Frame {frame_count} - Conversione: {conversion_time_ms:.2f} ms - Stampa: {printing_time_ms:.2f} ms")
-                frame_count += 1
-                fps_count += 1
-
+        fps_count += 1
+        if log_performance:
+            logging.info(f"Printing: {printing_time_ms:.2f} ms")
         now = time.time()
         if now - fps_start >= 1.0:
             if log_fps:
-                logging.info(f"[LOG] FPS effettivi: {fps_count}")
+                logging.info(f"[LOG] FPS display: {fps_count}")
+            fps_count = 0
+            fps_start = now
+
+
+def render_frames_sys(ascii_queue, stop_event, log_fps=False, log_performance=False):
+    """
+    Legge i frame ASCII dalla ascii_queue e li stampa sul terminale utilizzando sys.stdout.write.
+    Ogni frame viene stampato cancellando lo schermo (con sequenze ANSI) e viene loggato
+    il tempo impiegato per la stampa.
+
+    Parametri:
+        ascii_queue (Queue): coda dei frame ASCII.
+        stop_event (threading.Event): evento per terminare il ciclo.
+        log_fps (bool): se True, logga gli aggiornamenti del display al secondo.
+        log_performance (bool): se True, logga il tempo impiegato per la stampa.
+    """
+    fps_count = 0
+    fps_start = time.time()
+    while not stop_event.is_set():
+        try:
+            ascii_frame = ascii_queue.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        print_start = time.time()
+        # Cancella lo schermo e posiziona il cursore in alto a sinistra
+        sys.stdout.write("\033[2J\033[H" + ascii_frame)
+        sys.stdout.flush()
+        print_end = time.time()
+        printing_time_ms = (print_end - print_start) * 1000
+
+        fps_count += 1
+        if log_performance:
+            logging.info(f"Printing: {printing_time_ms:.2f} ms")
+        now = time.time()
+        if now - fps_start >= 1.0:
+            if log_fps:
+                logging.info(f"[LOG] FPS display: {fps_count}")
             fps_count = 0
             fps_start = now
 
 
 def main():
+    """
+    Funzione principale che configura il parsing degli argomenti, crea le code e i thread/processi
+    necessari alla pipeline (estrazione, conversione e rendering) e avvia il rendering con prompt_toolkit
+    oppure tramite sys.stdout.write in base alla flag --use_sys.
+    """
+    cv2.setNumThreads(1)
+
     parser = argparse.ArgumentParser(
-        description="Real-time ASCII video using prompt_toolkit and multiprocessing."
+        description="Real-time ASCII video using a parallel pipeline with separate conversion and rendering."
     )
     parser.add_argument("video_path", type=str, help="Path to the video file")
     parser.add_argument("width", type=int, help="Width of the ASCII output")
-    parser.add_argument("--fps", type=int, default=10, help="Frames per second (default: 10)")
-    parser.add_argument("--log_fps", action="store_true", help="Enable logging of actual FPS")
-    parser.add_argument("--log_performance", action="store_true", help="Enable logging of performance metrics")
-    parser.add_argument("--batch_size", type=int, default=1, help="Number of processes to use (default: 1)")
+    parser.add_argument("--fps", type=int, default=10, help="Frames per second for extraction (default: 10)")
+    parser.add_argument("--log_fps", action="store_true", help="Enable logging of display FPS")
+    parser.add_argument("--log_performance", action="store_true",
+                        help="Enable logging of conversion and printing performance")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
+    parser.add_argument("--use_threads", action="store_true",
+                        help="Use thread pool instead of multiprocessing pool (utile su Windows)")
+    parser.add_argument("--use_sys", action="store_true",
+                        help="Usa sys.stdout.write per il rendering invece di prompt_toolkit")
     args = parser.parse_args()
 
-    # Imposta la coda: maxsize = fps (o puoi sperimentare un valore leggermente maggiore)
-    frame_queue = Queue(maxsize=args.fps)
+    # Creazione delle code: una per i frame grezzi e una per i frame ASCII.
+    raw_queue = Queue(maxsize=args.fps)
+    ascii_queue = Queue(maxsize=args.fps)
 
-    extractor_process = Process(target=extract_frames, args=(args.video_path, frame_queue, args.fps))
+    # Avvia il processo di estrazione dei frame.
+    extractor_process = Process(target=extract_frames, args=(args.video_path, raw_queue, args.fps))
     extractor_process.start()
 
-    pool = Pool(processes=cpu_count())
+    # Crea il pool di conversione (processi o thread).
+    if args.use_threads:
+        pool = ThreadPool(processes=cpu_count())
+    else:
+        pool = Pool(processes=cpu_count())
 
-    # Definisci i key bindings: 'q' o Ctrl+C per uscire.
-    kb = KeyBindings()
-
-    @kb.add("q")
-    def exit_(event):
-        event.app.exit()
-
-    @kb.add("c-c")
-    def exit_ctrl_c(event):
-        event.app.exit()
-
-    control = FormattedTextControl(text=ANSI("Loading..."))
-    root_container = Window(content=control)
-    layout = Layout(root_container)
-
-    app = Application(layout=layout, key_bindings=kb, full_screen=True)
-
-    # Flag per la terminazione pulita del thread di aggiornamento
     stop_event = threading.Event()
 
-    updater_thread = threading.Thread(
-        target=update_frames,
-        args=(frame_queue, args.width, app, control, pool, stop_event, args.batch_size, args.log_fps, args.log_performance),
+    # Avvia il thread di conversione.
+    converter_thread = threading.Thread(
+        target=convert_frames,
+        args=(raw_queue, ascii_queue, pool, args.batch_size, args.width, stop_event, args.log_performance),
         daemon=True
     )
-    updater_thread.start()
+    converter_thread.start()
 
-    try:
-        app.run()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_event.set()
-        updater_thread.join(timeout=1)
-        pool.close()
-        pool.join()
-        extractor_process.terminate()
-        extractor_process.join()
-        frame_queue.close()
-        frame_queue.cancel_join_thread()
-        print("[✔] Terminazione completata.")
+    # In base alla modalità di rendering scelta, avvia il thread di rendering corrispondente.
+    if args.use_sys:
+        print("[INFO] Rendering con sys.stdout.write attivato. Premere Ctrl+C per uscire.")
+        renderer_thread = threading.Thread(
+            target=render_frames_sys,
+            args=(ascii_queue, stop_event, args.log_fps, args.log_performance),
+            daemon=True
+        )
+        renderer_thread.start()
+        try:
+            while not stop_event.is_set():
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        # Configura prompt_toolkit per il rendering.
+        kb = KeyBindings()
+
+        @kb.add("q")
+        def exit_(event):
+            event.app.exit()
+
+        @kb.add("c-c")
+        def exit_ctrl_c(event):
+            event.app.exit()
+
+        control = __import__('prompt_toolkit').layout.controls.FormattedTextControl(text=ANSI("Loading..."))
+        root_container = Window(content=control)
+        layout = Layout(root_container)
+        app = Application(layout=layout, key_bindings=kb, full_screen=True)
+
+        renderer_thread = threading.Thread(
+            target=render_frames_ptk,
+            args=(ascii_queue, app, control, stop_event, args.log_fps, args.log_performance),
+            daemon=True
+        )
+        renderer_thread.start()
+        try:
+            app.run()
+        except KeyboardInterrupt:
+            pass
+
+    # Cleanup: terminazione ordinata di thread e processi.
+    stop_event.set()
+    renderer_thread.join(timeout=1)
+    converter_thread.join(timeout=1)
+    pool.close()
+    pool.join()
+    extractor_process.terminate()
+    extractor_process.join()
+    raw_queue.close()
+    raw_queue.cancel_join_thread()
+    ascii_queue.close()
+    ascii_queue.cancel_join_thread()
+    print("[✔] Terminazione completata.")
 
 
 if __name__ == '__main__':
