@@ -310,6 +310,77 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
         sys.stdout.flush()
 
 
+def generate_calibration_frame(width, height):
+    """
+    Genera un frame ASCII di calibrazione tutto bianco, con un bordo e una croce centrale.
+
+    Parametri:
+        width (int): Larghezza dell'output ASCII.
+        height (int): Altezza dell'output ASCII.
+
+    Ritorna:
+        str: Stringa ASCII con il frame bianco, bordi e croce centrale.
+    """
+    # Caratteri
+    BORDER_CHAR = "#"
+    CROSS_CHAR = "+"
+    WHITE_CHAR = "█"  # Blocchi pieni per simulare un frame bianco
+
+    # Crea una matrice di caratteri bianchi
+    ascii_frame = [[WHITE_CHAR] * width for _ in range(height)]
+
+    # Disegna i bordi del rettangolo
+    for x in range(width):
+        ascii_frame[0][x] = BORDER_CHAR  # Riga superiore
+        ascii_frame[-1][x] = BORDER_CHAR  # Riga inferiore
+
+    for y in range(height):
+        ascii_frame[y][0] = BORDER_CHAR  # Colonna sinistra
+        ascii_frame[y][-1] = BORDER_CHAR  # Colonna destra
+
+    # Disegna la croce centrale
+    center_y, center_x = height // 2, width // 2
+    for x in range(width):
+        ascii_frame[center_y][x] = CROSS_CHAR  # Linea orizzontale
+    for y in range(height):
+        ascii_frame[y][center_x] = CROSS_CHAR  # Linea verticale
+
+    # Converti la matrice in una stringa
+    ascii_string = "\n".join("".join(row) for row in ascii_frame)
+    return ascii_string
+
+
+def render_calibration_frame(width, height):
+    """
+    Mostra un frame di calibrazione nel terminale e attende che l'utente prema ENTER.
+
+    Parametri:
+        width (int): Larghezza dell'output ASCII.
+        height (int): Altezza dell'output ASCII.
+    """
+    # Genera il frame di calibrazione
+    calibration_frame = generate_calibration_frame(width, height)
+
+    # Escape sequences per il terminale
+    HIDE_CURSOR = "\033[?25l"
+    SHOW_CURSOR = "\033[?25h"
+    CLEAR_SCREEN = "\033[2J\033[H"
+
+    # Pulisce lo schermo e nasconde il cursore
+    sys.stdout.write(HIDE_CURSOR)
+    sys.stdout.write(CLEAR_SCREEN)
+    sys.stdout.write(calibration_frame + "\n")
+    sys.stdout.write("\n[INFO] Regola la dimensione del terminale e premi ENTER per iniziare...\n")
+    sys.stdout.flush()
+
+    # Attendi l'input dell'utente
+    input()
+
+    # Ripristina il cursore
+    sys.stdout.write(SHOW_CURSOR)
+    sys.stdout.flush()
+
+
 def main():
     """
     Funzione principale che configura il parsing degli argomenti, crea le code e i thread/processi
@@ -331,6 +402,27 @@ def main():
     parser.add_argument("--use_threads", action="store_true",
                         help="Use thread pool instead of multiprocessing pool (utile su Windows)")
     args = parser.parse_args()
+
+    # Apertura video per ottenere le dimensioni iniziali
+    cap = cv2.VideoCapture(args.video_path)
+    if not cap.isOpened():
+        print("Errore: impossibile aprire il video.")
+        return
+
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        print("Errore: impossibile leggere il primo frame.")
+        return
+
+    # Calcola altezza proporzionata
+    height, width = frame.shape[:2]
+    aspect_ratio = height / width
+    new_height = int(aspect_ratio * args.width * 0.45)  # Altezza adattata
+
+    # Mostra il frame di calibrazione
+    render_calibration_frame(args.width, new_height)
+    sys.stdout.write("\033[2J\033[H")
 
     # Creazione delle code: una per i frame grezzi e una per i frame ASCII.
     raw_queue = Queue(maxsize=args.fps)
