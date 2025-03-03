@@ -422,7 +422,6 @@ def main():
 
     # Mostra il frame di calibrazione
     render_calibration_frame(args.width, new_height)
-    sys.stdout.write("\033[2J\033[H")
 
     # Creazione delle code: una per i frame grezzi e una per i frame ASCII.
     raw_queue = Queue(maxsize=args.fps)
