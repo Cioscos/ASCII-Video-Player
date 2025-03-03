@@ -1,5 +1,6 @@
-import itertools
 import queue
+from typing import List
+
 import cv2
 import numpy as np
 import argparse
@@ -8,7 +9,8 @@ import logging
 import threading
 import sys
 import shutil
-from multiprocessing import Process, Queue, Pool, cpu_count, Event
+from numba import jit
+from multiprocessing import Process, Queue, Pool, cpu_count
 from multiprocessing.dummy import Pool as ThreadPool  # Pool basato su thread (utile su Windows)
 
 # Configurazione del logging per salvare i tempi (in ms) di conversione e rendering.
@@ -150,12 +152,50 @@ def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_eve
             frame_count += 1
 
 
+@jit(nopython=True)
+def fast_diff_lines(new_lines: List[str], old_lines: List[str], max_lines: int) -> List[int]:
+    """
+    Computazione accelerata delle differenze tra righe mediante Numba JIT.
+
+    Parametri:
+        new_lines (List[str]): Lista delle nuove righe.
+        old_lines (List[str]): Lista delle righe precedenti.
+        max_lines (int): Numero massimo di righe da confrontare.
+
+    Ritorna:
+        List[int]: Indici delle righe che risultano differenti.
+    """
+    diff_indices = []  # Lista per salvare gli indici delle righe modificate
+    n_new = len(new_lines)
+    n_old = len(old_lines)
+    for i in range(max_lines):
+        # Se entrambi gli indici sono fuori dai limiti, passa al prossimo ciclo
+        if i >= n_new and i >= n_old:
+            continue
+
+        new_line = new_lines[i] if i < n_new else ""
+        old_line = old_lines[i] if i < n_old else ""
+
+        # Se le lunghezze sono differenti, la riga va aggiornata
+        if len(new_line) != len(old_line):
+            diff_indices.append(i)
+            continue
+
+        # Confronto carattere per carattere
+        for j in range(len(new_line)):
+            if j >= len(old_line) or new_line[j] != old_line[j]:
+                diff_indices.append(i)
+                break
+
+    return diff_indices
+
+
 def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_performance=False):
     """
     Reads ASCII frames from ascii_queue and partially updates the terminal display
-    using sys.stdout.write. Only modified lines are rewritten, avoiding clearing
-    the entire screen. If terminal resizing is detected, a full reset is forced
-    to clear any residual characters.
+    using sys.stdout.write with JIT-accelerated diff calculation.
+    Only modified lines are rewritten, avoiding clearing the entire screen.
+    If terminal resizing is detected, a full reset is forced to clear any residual characters.
 
     Parameters:
         ascii_queue (Queue): Queue of ASCII frames, containing tuples (ascii_frame, conversion_time_ms).
@@ -165,6 +205,7 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
     """
     prev_frame_lines = None
     prev_terminal_size = shutil.get_terminal_size()
+    max_line_length = prev_terminal_size.columns
     frame_counter = 0
     fps_count = 0
     fps_start = time.time()
@@ -188,6 +229,8 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             try:
                 ascii_frame, conversion_time_ms = ascii_queue.get(timeout=0.01)
             except queue.Empty:
+                # Breve pausa per ridurre il consumo CPU in attesa di nuovi frame
+                time.sleep(0.001)
                 continue
 
             # Start measuring rendering time here, including all logic
@@ -213,20 +256,21 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             # Full frame if no previous frame or terminal resized
             if prev_frame_lines is None:
                 output_buffer.append(ascii_frame)
+                diff_indices = list(range(len(frame_lines)))  # All lines are different
             else:
-                # Only process the number of lines we need to
+                # Calculate differences using JIT-compiled function
                 max_lines = max(len(frame_lines), len(prev_frame_lines))
-                for i in range(max_lines):
-                    # Get current lines with default empty strings
-                    new_line = frame_lines[i] if i < len(frame_lines) else ""
-                    old_line = prev_frame_lines[i] if i < len(prev_frame_lines) else ""
+                diff_indices = fast_diff_lines(frame_lines, prev_frame_lines, max_lines)
 
-                    # Only update if different
-                    if new_line != old_line:
+                # Build output buffer based on diff results
+                for i in diff_indices:
+                    if i < len(frame_lines):
+                        new_line = frame_lines[i]
                         # Add padding if new line is shorter than old one
-                        if len(new_line) < len(old_line):
-                            padding = " " * (len(old_line) - len(new_line))
-                            new_line += padding
+                        if i < len(prev_frame_lines):
+                            old_line = prev_frame_lines[i]
+                            if len(new_line) < len(old_line):
+                                new_line += " " * (len(old_line) - len(new_line))
 
                         # Add to buffer
                         output_buffer.append(f"{GOTO_FORMAT.format(i + 1)}{new_line}")
@@ -244,7 +288,10 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
                 rendering_end = time.time()
                 total_rendering_time_ms = (rendering_end - rendering_start) * 1000
                 logging.info(
-                    f"Frame {frame_counter} - Conversion: {conversion_time_ms:.2f} ms, Total Rendering: {total_rendering_time_ms:.2f} ms")
+                    f"Frame {frame_counter} - Conversion: {conversion_time_ms:.2f} ms, "
+                    f"Total Rendering: {total_rendering_time_ms:.2f} ms, "
+                    f"Changed lines: {len(diff_indices)}"
+                )
 
             frame_counter += 1
             fps_count += 1
