@@ -353,6 +353,7 @@ def generate_calibration_frame(width, height):
 def render_calibration_frame(width, height):
     """
     Mostra un frame di calibrazione nel terminale e attende che l'utente prema ENTER.
+    Dopo l'input, il terminale viene svuotato e il buffer di scorrimento viene rimosso.
 
     Parametri:
         width (int): Larghezza dell'output ASCII.
@@ -365,6 +366,7 @@ def render_calibration_frame(width, height):
     HIDE_CURSOR = "\033[?25l"
     SHOW_CURSOR = "\033[?25h"
     CLEAR_SCREEN = "\033[2J\033[H"
+    RESET_TERMINAL = "\033c"  # Reset completo del terminale
 
     # Pulisce lo schermo e nasconde il cursore
     sys.stdout.write(HIDE_CURSOR)
@@ -375,6 +377,10 @@ def render_calibration_frame(width, height):
 
     # Attendi l'input dell'utente
     input()
+
+    # Resetta completamente il terminale (rimuove lo scrollback buffer)
+    sys.stdout.write(RESET_TERMINAL)
+    sys.stdout.flush()
 
     # Ripristina il cursore
     sys.stdout.write(SHOW_CURSOR)
