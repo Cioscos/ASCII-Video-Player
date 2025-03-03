@@ -256,7 +256,7 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             # Full frame if no previous frame or terminal resized
             if prev_frame_lines is None:
                 output_buffer.append(ascii_frame)
-                diff_indices = list(range(len(frame_lines)))  # All lines are different
+                diff_indices = list(range(len(frame_lines)))
             else:
                 # Calculate differences using JIT-compiled function
                 max_lines = max(len(frame_lines), len(prev_frame_lines))
@@ -305,7 +305,13 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
                 fps_count = 0
                 fps_start = now
     finally:
-        # Restore cursor visibility
+        # Al termine del rendering, sposta il cursore in fondo al terminale.
+        try:
+            term_height = shutil.get_terminal_size().lines
+        except Exception:
+            term_height = 25
+        sys.stdout.write("\n" * term_height)
+        # Ripristina la visibilità del cursore.
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
 
