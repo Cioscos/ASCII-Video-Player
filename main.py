@@ -165,26 +165,41 @@ def frame_to_ascii_curses_color(frame_data) -> List[List[Tuple[str, int]]]:
 
 
 def extract_frames(video_path, raw_queue, fps):
-    """
-    Estrae i frame da un video e li inserisce nella coda raw_queue.
-
-    Parametri:
-        video_path (str): percorso del file video.
-        raw_queue (Queue): coda per passare i frame grezzi.
-        fps (int): numero di frame al secondo da estrarre.
-    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print("Errore: impossibile aprire il video.")
         return
-    frame_time = 1 / fps
+
+    target_frame_time = 1 / fps
+
     try:
+        last_frame_time = time.perf_counter()
         while cap.isOpened():
+            # Controlla quanto è piena la coda
+            queue_fullness = raw_queue.qsize() / raw_queue._maxsize
+
+            # Se la coda è troppo piena, rallenta l'estrazione
+            if queue_fullness > 0.8:
+                time.sleep(target_frame_time)
+                continue
+
             ret, frame = cap.read()
             if not ret:
                 break
+
             raw_queue.put(frame)
-            time.sleep(frame_time)
+
+            # Calcola il tempo effettivo trascorso
+            current_time = time.perf_counter()
+            elapsed = current_time - last_frame_time
+
+            # Regola il tempo di attesa in base al target FPS
+            sleep_time = max(0, target_frame_time - elapsed)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+            last_frame_time = time.perf_counter()
+
     except KeyboardInterrupt:
         print("\n[!] Interruzione nell'estrazione dei frame.")
     finally:
@@ -193,26 +208,36 @@ def extract_frames(video_path, raw_queue, fps):
 
 
 def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_event, conversion_function):
-    """
-    Legge i frame grezzi dalla raw_queue e li elabora in batch con un pool parallelo.
-    Questa versione accumula quanti più frame sono disponibili fino a un massimo di batch_size
-    senza aspettare inutilmente, riducendo così i tempi di attesa.
+    max_batch_size = batch_size
+    min_batch_size = max(1, batch_size // 4)
+    current_batch_size = batch_size
+    adaptation_rate = 0.1  # Tasso di adattamento
 
-    Parametri:
-        raw_queue (Queue): coda dei frame grezzi.
-        ascii_queue (Queue): coda dei frame convertiti in ASCII insieme al tempo di conversione.
-        pool (Pool): pool di processi o thread per la conversione.
-        batch_size (int): numero massimo di frame da elaborare insieme.
-        new_width (int): larghezza desiderata per l'output ASCII.
-        stop_event (threading.Event): evento per terminare il ciclo.
-        conversion_function (callable): funzione da utilizzare per convertire un frame in ASCII.
-    """
+    # Metriche per l'auto-regolazione
+    last_adapt_time = time.perf_counter()
+    adapt_interval = 1.0  # Secondi tra regolazioni
+
     while not stop_event.is_set():
+        # Adatta la dimensione del batch in base alla pienezza delle code
+        current_time = time.perf_counter()
+        if current_time - last_adapt_time > adapt_interval:
+            ascii_fullness = ascii_queue.qsize() / ascii_queue._maxsize
+            raw_fullness = 0 if raw_queue.empty() else raw_queue.qsize() / raw_queue._maxsize
+
+            # Se la coda ASCII è quasi piena, riduci il batch
+            if ascii_fullness > 0.8:
+                current_batch_size = max(min_batch_size, int(current_batch_size * (1 - adaptation_rate)))
+            # Se la coda raw è ben rifornita e la ASCII ha spazio, aumenta il batch
+            elif raw_fullness > 0.5 and ascii_fullness < 0.3:
+                current_batch_size = min(max_batch_size, int(current_batch_size * (1 + adaptation_rate)))
+
+            last_adapt_time = current_time
+
         batch = []
-        # Accumula quanti più frame sono disponibili fino a un massimo di batch_size
-        for _ in range(batch_size):
+        # Accumula frame fino alla dimensione del batch attuale
+        for _ in range(current_batch_size):
             try:
-                frame = raw_queue.get(timeout=0.01)
+                frame = raw_queue.get(timeout=0.005)  # Timeout più breve
             except queue.Empty:
                 break
             if frame is None:
@@ -221,19 +246,25 @@ def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_eve
             batch.append((frame, new_width))
 
         if not batch:
+            # Breve pausa per evitare cicli a vuoto
+            time.sleep(0.001)
             continue
 
         conv_start = time.perf_counter()
         try:
-            ascii_frames = pool.map(conversion_function, batch, chunksize=len(batch))
+            ascii_frames = pool.map(conversion_function, batch)
         except Exception as e:
             print("Errore durante la conversione dei frame:", e)
             break
         conv_end = time.perf_counter()
         conversion_time_ms = ((conv_end - conv_start) * 1000) / len(batch)
 
-        # Invia nella coda per ogni frame una tupla (ascii_frame, conversion_time_ms)
+        # Limita la velocità di inserimento nella coda ASCII se è troppo piena
         for af in ascii_frames:
+            while not stop_event.is_set() and ascii_queue.qsize() > 0.9 * ascii_queue._maxsize:
+                time.sleep(0.005)
+            if stop_event.is_set():
+                break
             ascii_queue.put((af, conversion_time_ms))
 
 
@@ -791,8 +822,12 @@ def main():
 
     render_calibration_frame(args.width, new_height)
 
-    raw_queue = Queue(maxsize=args.fps * 3)
-    ascii_queue = Queue(maxsize=args.fps * 3)
+    # Calcola la dimensione delle code in base agli FPS richiesti
+    buffer_seconds = 2  # Quanti secondi di buffer vogliamo
+    queue_size = max(args.fps * buffer_seconds, args.fps * 3)
+
+    raw_queue = Queue(maxsize=queue_size)
+    ascii_queue = Queue(maxsize=queue_size)
 
     extractor_process = Process(target=extract_frames, args=(args.video_path, raw_queue, args.fps))
     extractor_process.start()
