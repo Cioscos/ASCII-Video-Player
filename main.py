@@ -1,5 +1,5 @@
 import queue
-from typing import List
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -109,6 +109,59 @@ def frame_to_ascii_curses(frame_data):
     # Costruisce la stringa ASCII senza escape di colore
     ascii_str = "\n".join("".join(row) for row in ascii_chars)
     return ascii_str
+
+
+def frame_to_ascii_curses_color(frame_data) -> List[List[Tuple[str, int]]]:
+    """
+    Converte un frame video in una rappresentazione ASCII colorata adatta per il rendering
+    con la libreria curses. Per ogni cella restituisce una tupla (carattere, color_index) dove
+    color_index è l'indice del colore in xterm 256 colori.
+
+    Parametri:
+        frame_data (tuple): (frame, new_width) dove:
+            - frame: array NumPy contenente il frame (in formato BGR).
+            - new_width (int): larghezza desiderata dell'output ASCII.
+
+    Ritorna:
+        List[List[Tuple[str, int]]]: Rappresentazione 2D del frame, dove ogni elemento
+                                     è una tupla contenente il carattere ASCII e il colore.
+    """
+    frame, new_width = frame_data
+    height, width = frame.shape[:2]
+    aspect_ratio = height / width
+    # Assicura che l'altezza non sia zero
+    new_height = max(int(aspect_ratio * new_width * 0.5), 1)
+
+    # Ridimensiona il frame
+    resized = cv2.resize(frame, (new_width, new_height))
+    rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+
+    # Calcola la luminosità per mappare in carattere ASCII
+    brightness = np.mean(rgb_frame, axis=2).astype(np.uint8)
+    char_indices = (brightness.astype(np.uint16) * (len(ASCII_CHARS) - 1) // 255).astype(np.uint8)
+    ascii_chars = np.array(list(ASCII_CHARS))[char_indices]
+
+    # Converti i canali in un tipo a 16 bit per evitare overflow
+    r_channel = rgb_frame[:, :, 0].astype(np.uint16)
+    g_channel = rgb_frame[:, :, 1].astype(np.uint16)
+    b_channel = rgb_frame[:, :, 2].astype(np.uint16)
+
+    # Calcola l'indice colore in xterm 256 colori.
+    # Mappa ogni canale (0-255) in un range 0-5.
+    r6 = (r_channel * 6) // 256
+    g6 = (g_channel * 6) // 256
+    b6 = (b_channel * 6) // 256
+    color_indices = 16 + 36 * r6 + 6 * g6 + b6
+
+    # Costruisci la rappresentazione 2D: per ogni cella una tupla (carattere, color_index)
+    frame_ascii = []
+    for i in range(new_height):
+        row = []
+        for j in range(new_width):
+            row.append((str(ascii_chars[i, j]), int(color_indices[i, j])))
+        frame_ascii.append(row)
+
+    return frame_ascii
 
 
 def extract_frames(video_path, raw_queue, fps):
@@ -324,6 +377,152 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
         sys.stdout.flush()
 
 
+def render_frames_curses_color(ascii_queue, stop_event, log_fps=False, log_performance=False):
+    """
+    Renderizza i frame ASCII colorati utilizzando la libreria curses.
+    Per ogni riga, vengono aggiornati in blocco i segmenti contigui che presentano differenze rispetto al frame precedente,
+    riducendo il numero di chiamate a curses.addstr e migliorando le performance.
+
+    Parametri:
+        ascii_queue (Queue): coda contenente tuple (ascii_frame, conversion_time_ms) dove
+                             ascii_frame è una rappresentazione 2D del frame come lista di liste
+                             di tuple (carattere, color_index).
+        stop_event (threading.Event): evento usato per terminare il ciclo di rendering.
+        log_fps (bool): se True, logga il numero di aggiornamenti al secondo.
+        log_performance (bool): se True, logga il tempo impiegato per il rendering di ogni frame.
+    """
+
+    def curses_loop(stdscr):
+        # Inizializza il supporto colori in curses
+        curses.start_color()
+        curses.use_default_colors()
+        stdscr.nodelay(True)
+        curses.curs_set(0)  # Nasconde il cursore
+        frame_counter = 0
+        fps_count = 0
+        fps_start = time.perf_counter()
+        prev_frame = []  # Rappresentazione 2D del frame precedente
+        max_y, max_x = stdscr.getmaxyx()
+
+        # Cache per le coppie colore: mappa color_index -> pair_number
+        color_pair_cache = {}
+        next_pair_number = 1  # I numeri di coppia iniziano da 1
+
+        def get_color_attr(color_index):
+            """
+            Restituisce l'attributo curses per un dato indice di colore xterm 256.
+            Se non esiste, inizializza una nuova coppia colore. In caso il terminale non supporti
+            256 colori, viene applicato un mapping semplice.
+
+            Parametri:
+                color_index (int): Indice del colore in xterm 256.
+
+            Ritorna:
+                int: Attributo curses per il colore.
+            """
+            nonlocal next_pair_number
+            # Se il terminale supporta meno di 256 colori, mappa l'indice
+            mapped_color = color_index
+            if curses.COLORS < 256:
+                mapped_color = color_index % curses.COLORS
+
+            if color_index in color_pair_cache:
+                return curses.color_pair(color_pair_cache[color_index])
+            else:
+                if next_pair_number >= curses.COLOR_PAIRS:
+                    return curses.A_NORMAL
+                try:
+                    curses.init_pair(next_pair_number, mapped_color, -1)
+                    color_pair_cache[color_index] = next_pair_number
+                    pair_attr = curses.color_pair(next_pair_number)
+                    next_pair_number += 1
+                    return pair_attr
+                except curses.error:
+                    return curses.A_NORMAL
+
+        while not stop_event.is_set():
+            try:
+                ascii_frame, conversion_time_ms = ascii_queue.get(timeout=0.005)
+            except queue.Empty:
+                # Controlla eventuale input per uscita
+                if stdscr.getch() == ord('q'):
+                    stop_event.set()
+                continue
+
+            if log_performance:
+                rendering_start = time.perf_counter()
+
+            # ascii_frame è una lista di liste di tuple (carattere, color_index)
+            new_frame = ascii_frame
+
+            curr_max_y, curr_max_x = stdscr.getmaxyx()
+            if curr_max_y != max_y or curr_max_x != max_x:
+                stdscr.clear()
+                max_y, max_x = curr_max_y, curr_max_x
+                prev_frame = [[('', -1)] * max_x for _ in range(max_y)]
+
+            # Aggiorna per riga in maniera "aggregata"
+            for i in range(min(len(new_frame), max_y)):
+                new_row = new_frame[i]
+                old_row = prev_frame[i] if i < len(prev_frame) else [('', -1)] * len(new_row)
+                j = 0
+                while j < min(len(new_row), max_x):
+                    # Se la cella non è cambiata, salta
+                    if new_row[j] == old_row[j]:
+                        j += 1
+                        continue
+                    # Inizio di un segmento modificato
+                    start = j
+                    current_color = new_row[j][1]
+                    current_attr = get_color_attr(current_color)
+                    segment_chars = [new_row[j][0]]
+                    j += 1
+                    # Raggruppa i caratteri contigui che hanno lo stesso attributo e sono modificati
+                    while j < min(len(new_row), max_x):
+                        # Se la cella è invariata o il colore differisce, interrompi il segmento
+                        if new_row[j] == old_row[j]:
+                            break
+                        next_attr = get_color_attr(new_row[j][1])
+                        if next_attr != current_attr:
+                            break
+                        segment_chars.append(new_row[j][0])
+                        j += 1
+                    segment_str = "".join(segment_chars)
+                    try:
+                        stdscr.addstr(i, start, segment_str, current_attr)
+                    except curses.error:
+                        pass
+
+            stdscr.refresh()
+
+            # Aggiorna il frame precedente (copia profonda)
+            prev_frame = [row[:] for row in new_frame]
+
+            if log_performance:
+                rendering_end = time.perf_counter()
+                total_rendering_time_ms = (rendering_end - rendering_start) * 1000
+                logging.info(
+                    f"Frame {frame_counter} - Conversion: {conversion_time_ms:.2f} ms, "
+                    f"Total Rendering: {total_rendering_time_ms:.2f} ms"
+                )
+
+            frame_counter += 1
+            fps_count += 1
+
+            now = time.perf_counter()
+            elapsed = now - fps_start
+            if elapsed >= 1.0:
+                if log_fps:
+                    logging.info(f"[LOG] FPS display (curses color): {fps_count / elapsed:.1f}")
+                fps_count = 0
+                fps_start = now
+
+            if stdscr.getch() == ord('q'):
+                stop_event.set()
+
+    curses.wrapper(curses_loop)
+
+
 def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance=False):
     """
     Renderizza i frame ASCII utilizzando la libreria curses con aggiornamento parziale
@@ -474,7 +673,6 @@ def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance
     curses.wrapper(curses_loop)
 
 
-
 def generate_calibration_frame(width, height):
     """
     Genera un frame ASCII di calibrazione tutto bianco, con un bordo e una croce centrale.
@@ -556,7 +754,8 @@ def main():
     """
     Funzione principale che configura il parsing degli argomenti, crea le code e i thread/processi
     necessari alla pipeline (estrazione, conversione e rendering) e avvia il rendering in tempo reale.
-    In base alla flag --use_curses, il rendering avviene tramite curses oppure con il metodo standard (sys).
+    In base alle flag --use_curses e --curses_color, il rendering avviene tramite curses in modalità colorata o monocromatica,
+    oppure con il metodo standard (sys).
     """
     cv2.setNumThreads(1)
 
@@ -571,6 +770,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
     parser.add_argument("--use_threads", action="store_true", help="Use thread pool instead of multiprocessing pool (utile su Windows)")
     parser.add_argument("--use_curses", action="store_true", help="Use curses library for rendering instead of sys-based partial rendering")
+    parser.add_argument("--curses_color", action="store_true", help="In curses mode, use colored rendering")
     args = parser.parse_args()
 
     # Apertura video per ottenere le dimensioni iniziali
@@ -604,10 +804,14 @@ def main():
 
     stop_event = threading.Event()
 
-    # Se si usa curses, si usa una conversione senza sequenze ANSI
+    # Se viene attivata la modalità curses, scegli il rendering a colori o monocromatico
     if args.use_curses:
-        conversion_function = frame_to_ascii_curses
-        renderer_function = render_frames_curses
+        if args.curses_color:
+            conversion_function = frame_to_ascii_curses_color
+            renderer_function = render_frames_curses_color
+        else:
+            conversion_function = frame_to_ascii_curses
+            renderer_function = render_frames_curses
     else:
         conversion_function = frame_to_ascii
         renderer_function = render_frames_sys_partial
@@ -644,7 +848,6 @@ def main():
     ascii_queue.close()
     ascii_queue.cancel_join_thread()
     print("[✔] Terminazione completata.")
-
 
 if __name__ == '__main__':
     main()
