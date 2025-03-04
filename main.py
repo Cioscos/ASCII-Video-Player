@@ -326,22 +326,24 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
 
 def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance=False):
     """
-    Renderizza i frame ASCII utilizzando la libreria curses.
-    Questa funzione si occupa di aggiornare lo schermo curses con i nuovi frame.
-    Premendo il tasto 'q' l'utente può interrompere il rendering.
+    Renderizza i frame ASCII utilizzando la libreria curses con aggiornamento parziale
+    a livello di caratteri. Aggiorna solamente i caratteri che risultano differenti
+    rispetto al frame precedente, riducendo il carico di aggiornamento dello schermo
+    e migliorando le performance.
 
     Parametri:
-        ascii_queue (Queue): coda dei frame ASCII, contenente tuple (ascii_frame, conversion_time_ms).
-        stop_event (threading.Event): evento per terminare il ciclo.
-        log_fps (bool): se True, logga il numero di aggiornamenti al secondo.
-        log_performance (bool): se True, logga il tempo impiegato nel rendering.
+        ascii_queue (Queue): Coda contenente tuple (ascii_frame, conversion_time_ms) da renderizzare.
+        stop_event (threading.Event): Evento usato per terminare il ciclo di rendering.
+        log_fps (bool): Se True, logga il numero di aggiornamenti al secondo.
+        log_performance (bool): Se True, logga il tempo impiegato per il rendering di ogni frame.
     """
     def curses_loop(stdscr):
-        curses.curs_set(0)  # Nasconde il cursore
-        stdscr.nodelay(True)  # Input non bloccante
+        curses.curs_set(0)   # Nasconde il cursore
+        stdscr.nodelay(True) # Input non bloccante
         frame_counter = 0
         fps_count = 0
-        fps_start = time.time()
+        fps_start = time.perf_counter()  # Usa un timer ad alta risoluzione
+        prev_frame_lines = []  # Salva il frame precedente per il confronto
 
         while not stop_event.is_set():
             try:
@@ -351,22 +353,51 @@ def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance
                 continue
 
             if log_performance:
-                rendering_start = time.time()
+                rendering_start = time.perf_counter()  # Timer ad alta risoluzione
 
             frame_lines = ascii_frame.split("\n")
             max_y, max_x = stdscr.getmaxyx()
-            for i, line in enumerate(frame_lines):
+            num_lines = max(len(frame_lines), len(prev_frame_lines))
+
+            # Aggiornamento parziale: riga per riga, carattere per carattere
+            for i in range(num_lines):
                 if i >= max_y:
-                    break
-                try:
-                    stdscr.addstr(i, 0, line[:max_x-1])
-                except curses.error:
-                    pass
+                    break  # Non aggiornare righe oltre il limite dello schermo
+
+                new_line = frame_lines[i] if i < len(frame_lines) else ""
+                old_line = prev_frame_lines[i] if i < len(prev_frame_lines) else ""
+                min_len = min(len(new_line), len(old_line))
+
+                # Confronto carattere per carattere
+                for j in range(min_len):
+                    if j >= max_x - 1:
+                        break  # Limita la lunghezza alla larghezza dello schermo
+                    if new_line[j] != old_line[j]:
+                        try:
+                            stdscr.addch(i, j, new_line[j])
+                        except curses.error:
+                            pass
+
+                # Se la nuova riga è più lunga, aggiorna il tratto in eccesso
+                if len(new_line) > min_len:
+                    try:
+                        stdscr.addstr(i, min_len, new_line[min_len:min(max_x-1, len(new_line))])
+                    except curses.error:
+                        pass
+
+                # Se la vecchia riga era più lunga, cancella i caratteri in eccesso
+                if len(old_line) > len(new_line):
+                    try:
+                        clear_length = min(max_x - len(new_line) - 1, len(old_line) - len(new_line))
+                        stdscr.addstr(i, len(new_line), " " * clear_length)
+                    except curses.error:
+                        pass
 
             stdscr.refresh()
+            prev_frame_lines = frame_lines
 
             if log_performance:
-                rendering_end = time.time()
+                rendering_end = time.perf_counter()  # Timer ad alta risoluzione
                 total_rendering_time_ms = (rendering_end - rendering_start) * 1000
                 logging.info(
                     f"Frame {frame_counter} - Conversion: {conversion_time_ms:.2f} ms, "
@@ -376,7 +407,7 @@ def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance
             frame_counter += 1
             fps_count += 1
 
-            now = time.time()
+            now = time.perf_counter()  # Timer ad alta risoluzione
             elapsed = now - fps_start
             if elapsed >= 1.0:
                 if log_fps:
@@ -392,6 +423,7 @@ def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance
                 pass
 
     curses.wrapper(curses_loop)
+
 
 
 def generate_calibration_frame(width, height):
