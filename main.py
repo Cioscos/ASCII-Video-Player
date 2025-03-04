@@ -337,64 +337,115 @@ def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance
         log_fps (bool): Se True, logga il numero di aggiornamenti al secondo.
         log_performance (bool): Se True, logga il tempo impiegato per il rendering di ogni frame.
     """
+
     def curses_loop(stdscr):
-        curses.curs_set(0)   # Nasconde il cursore
-        stdscr.nodelay(True) # Input non bloccante
+        curses.curs_set(0)  # Nasconde il cursore
+        stdscr.nodelay(True)  # Input non bloccante
         frame_counter = 0
         fps_count = 0
         fps_start = time.perf_counter()  # Usa un timer ad alta risoluzione
         prev_frame_lines = []  # Salva il frame precedente per il confronto
+        max_y, max_x = stdscr.getmaxyx()
+
+        # Pre-allocazione delle stringhe di spazi per la pulizia
+        blank_spaces = {}  # Cache di stringhe di spazi
 
         while not stop_event.is_set():
+            # Poll dell'evento di stop prima di attendere sulla coda
+            if stop_event.is_set():
+                break
+
             try:
-                ascii_frame, conversion_time_ms = ascii_queue.get(timeout=0.01)
+                # Riduzione del timeout per una risposta più veloce ai segnali di stop
+                ascii_frame, conversion_time_ms = ascii_queue.get(timeout=0.005)
             except queue.Empty:
-                time.sleep(0.001)
+                # Verifica dell'input senza dormire
+                key = stdscr.getch()
+                if key == ord('q'):
+                    stop_event.set()
                 continue
 
             if log_performance:
                 rendering_start = time.perf_counter()  # Timer ad alta risoluzione
 
             frame_lines = ascii_frame.split("\n")
-            max_y, max_x = stdscr.getmaxyx()
-            num_lines = max(len(frame_lines), len(prev_frame_lines))
+            curr_max_y, curr_max_x = stdscr.getmaxyx()
+            # Aggiorna le dimensioni dello schermo solo se cambiate
+            if curr_max_y != max_y or curr_max_x != max_x:
+                max_y, max_x = curr_max_y, curr_max_x
 
-            # Aggiornamento parziale: riga per riga, carattere per carattere
+            num_lines = min(max(len(frame_lines), len(prev_frame_lines)), max_y)
+
+            # Aggiornamento parziale: riga per riga
             for i in range(num_lines):
-                if i >= max_y:
-                    break  # Non aggiornare righe oltre il limite dello schermo
-
                 new_line = frame_lines[i] if i < len(frame_lines) else ""
                 old_line = prev_frame_lines[i] if i < len(prev_frame_lines) else ""
+
+                # Ottimizzazione: salta l'intera riga se identica
+                if new_line == old_line:
+                    continue
+
+                max_width = max_x - 1  # Calcola una sola volta
+
+                # Ottimizzazione: se le righe sono completamente diverse, riscrivi tutta la riga
+                if len(new_line) <= max_width and abs(len(new_line) - len(old_line)) > len(new_line) // 2:
+                    try:
+                        stdscr.move(i, 0)
+                        stdscr.clrtoeol()
+                        if new_line:
+                            stdscr.addstr(i, 0, new_line)
+                        continue
+                    except curses.error:
+                        pass
+
+                # Altrimenti, confronto carattere per carattere per aggiornamenti parziali
                 min_len = min(len(new_line), len(old_line))
 
-                # Confronto carattere per carattere
-                for j in range(min_len):
-                    if j >= max_x - 1:
-                        break  # Limita la lunghezza alla larghezza dello schermo
-                    if new_line[j] != old_line[j]:
+                # Trova la prima differenza per ottimizzare
+                start_diff = 0
+                while start_diff < min_len and new_line[start_diff] == old_line[start_diff]:
+                    start_diff += 1
+
+                # Trova l'ultima differenza per ottimizzare ulteriormente
+                if start_diff < min_len:
+                    end_diff = min_len - 1
+                    while end_diff > start_diff and new_line[end_diff] == old_line[end_diff]:
+                        end_diff -= 1
+
+                    # Aggiorna solo i caratteri che cambiano nel mezzo
+                    if start_diff <= end_diff and end_diff < max_width:
                         try:
-                            stdscr.addch(i, j, new_line[j])
+                            segment = new_line[start_diff:end_diff + 1]
+                            stdscr.addstr(i, start_diff, segment)
                         except curses.error:
                             pass
 
                 # Se la nuova riga è più lunga, aggiorna il tratto in eccesso
-                if len(new_line) > min_len:
+                if len(new_line) > len(old_line):
                     try:
-                        stdscr.addstr(i, min_len, new_line[min_len:min(max_x-1, len(new_line))])
+                        segment_start = max(len(old_line), start_diff)
+                        if segment_start < len(new_line) and segment_start < max_width:
+                            stdscr.addstr(i, segment_start, new_line[segment_start:min(max_width, len(new_line))])
                     except curses.error:
                         pass
 
                 # Se la vecchia riga era più lunga, cancella i caratteri in eccesso
-                if len(old_line) > len(new_line):
+                elif len(old_line) > len(new_line):
                     try:
-                        clear_length = min(max_x - len(new_line) - 1, len(old_line) - len(new_line))
-                        stdscr.addstr(i, len(new_line), " " * clear_length)
+                        clear_length = min(max_width - len(new_line), len(old_line) - len(new_line))
+                        if clear_length > 0:
+                            # Usa cache per le stringhe di spazi
+                            if clear_length not in blank_spaces:
+                                blank_spaces[clear_length] = " " * clear_length
+                            stdscr.addstr(i, len(new_line), blank_spaces[clear_length])
                     except curses.error:
                         pass
 
+            # Aggiorna solo alla fine del disegno completo
             stdscr.refresh()
-            prev_frame_lines = frame_lines
+
+            # Usa copia profonda solo se necessario
+            prev_frame_lines = frame_lines.copy() if frame_lines else []
 
             if log_performance:
                 rendering_end = time.perf_counter()  # Timer ad alta risoluzione
@@ -415,12 +466,10 @@ def render_frames_curses(ascii_queue, stop_event, log_fps=False, log_performance
                 fps_count = 0
                 fps_start = now
 
-            try:
-                key = stdscr.getch()
-                if key == ord('q'):
-                    stop_event.set()
-            except Exception:
-                pass
+            # Controllo input spostato alla fine del ciclo
+            key = stdscr.getch()
+            if key == ord('q'):
+                stop_event.set()
 
     curses.wrapper(curses_loop)
 
