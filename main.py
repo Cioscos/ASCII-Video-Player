@@ -194,26 +194,27 @@ def extract_frames(video_path, raw_queue, fps):
 
 def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_event, conversion_function):
     """
-    Legge i frame grezzi dalla raw_queue, li elabora in batch con un pool parallelo
-    e mette nella coda ascii_queue una tupla (ascii_frame, conversion_time_ms).
+    Legge i frame grezzi dalla raw_queue e li elabora in batch con un pool parallelo.
+    Questa versione accumula quanti più frame sono disponibili fino a un massimo di batch_size
+    senza aspettare inutilmente, riducendo così i tempi di attesa.
 
     Parametri:
         raw_queue (Queue): coda dei frame grezzi.
         ascii_queue (Queue): coda dei frame convertiti in ASCII insieme al tempo di conversione.
         pool (Pool): pool di processi o thread per la conversione.
-        batch_size (int): numero di frame da elaborare insieme.
+        batch_size (int): numero massimo di frame da elaborare insieme.
         new_width (int): larghezza desiderata per l'output ASCII.
         stop_event (threading.Event): evento per terminare il ciclo.
         conversion_function (callable): funzione da utilizzare per convertire un frame in ASCII.
     """
-    frame_count = 0
     while not stop_event.is_set():
         batch = []
+        # Accumula quanti più frame sono disponibili fino a un massimo di batch_size
         for _ in range(batch_size):
             try:
-                frame = raw_queue.get(timeout=0.05)
+                frame = raw_queue.get(timeout=0.01)
             except queue.Empty:
-                continue
+                break
             if frame is None:
                 stop_event.set()
                 break
@@ -222,19 +223,18 @@ def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_eve
         if not batch:
             continue
 
-        conv_start = time.time()
+        conv_start = time.perf_counter()
         try:
             ascii_frames = pool.map(conversion_function, batch, chunksize=len(batch))
         except Exception as e:
             print("Errore durante la conversione dei frame:", e)
             break
-        conv_end = time.time()
+        conv_end = time.perf_counter()
         conversion_time_ms = ((conv_end - conv_start) * 1000) / len(batch)
 
         # Invia nella coda per ogni frame una tupla (ascii_frame, conversion_time_ms)
         for af in ascii_frames:
             ascii_queue.put((af, conversion_time_ms))
-            frame_count += 1
 
 
 @jit(nopython=True)
@@ -291,7 +291,7 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
     prev_terminal_size = shutil.get_terminal_size()
     frame_counter = 0
     fps_count = 0
-    fps_start = time.time()
+    fps_start = time.perf_counter()
 
     # Sequenze di escape precompilate
     HIDE_CURSOR = "\033[?25l"
@@ -310,11 +310,11 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             try:
                 ascii_frame, conversion_time_ms = ascii_queue.get(timeout=0.01)
             except queue.Empty:
-                time.sleep(0.001)
+                #time.sleep(0.001)
                 continue
 
             if log_performance:
-                rendering_start = time.time()
+                rendering_start = time.perf_counter()
 
             frame_lines = ascii_frame.split("\n")
             current_terminal_size = shutil.get_terminal_size()
@@ -349,7 +349,7 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             prev_frame_lines = frame_lines
 
             if log_performance:
-                rendering_end = time.time()
+                rendering_end = time.perf_counter()
                 total_rendering_time_ms = (rendering_end - rendering_start) * 1000
                 logging.info(
                     f"Frame {frame_counter} - Conversion: {conversion_time_ms:.2f} ms, "
@@ -360,7 +360,7 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             frame_counter += 1
             fps_count += 1
 
-            now = time.time()
+            now = time.perf_counter()
             elapsed = now - fps_start
             if elapsed >= 1.0:
                 if log_fps:
@@ -791,8 +791,8 @@ def main():
 
     render_calibration_frame(args.width, new_height)
 
-    raw_queue = Queue(maxsize=args.fps)
-    ascii_queue = Queue(maxsize=args.fps)
+    raw_queue = Queue(maxsize=args.fps * 3)
+    ascii_queue = Queue(maxsize=args.fps * 3)
 
     extractor_process = Process(target=extract_frames, args=(args.video_path, raw_queue, args.fps))
     extractor_process.start()
