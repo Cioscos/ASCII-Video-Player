@@ -1,4 +1,6 @@
+import collections
 import queue
+from functools import lru_cache
 from typing import List, Tuple
 
 import cv2
@@ -26,58 +28,93 @@ logging.basicConfig(
 ASCII_CHARS = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
 # Precompone una Look-Up Table (LUT) per mappare un valore di luminosità (0-255) in un carattere ASCII.
 ASCII_LUT = np.array(list(ASCII_CHARS))
+# Cache per le stringhe ANSI preformattate
+_ANSI_CACHE = {}
+# Costanti ANSI per evitare ripetute concatenazioni di stringhe
+ANSI_PREFIX = "\033[38;2;"
+ANSI_MID = "m"
+ANSI_SUFFIX = "\033[0m"
 
 
-def frame_to_ascii(frame_data):
+@lru_cache(maxsize=128)
+def _get_ansi_sequence(r, g, b, char):
     """
-    Converte un frame video in una stringa ASCII a colori usando operazioni vettorializzate.
-    Utilizza sequenze ANSI per colorare ciascun carattere.
+    Genera e memorizza nella cache una sequenza ANSI per un dato colore RGB e carattere.
+    Usa una funzione separata decorata con lru_cache per la memoizzazione.
+    """
+    return f"{ANSI_PREFIX}{r};{g};{b}{ANSI_MID}{char}{ANSI_SUFFIX}"
+
+
+def frame_to_ascii(frame_data, use_cache=True):
+    """
+    Converte un frame video in una stringa ASCII a colori usando operazioni vettorializzate
+    e tecniche di caching.
 
     Parametri:
         frame_data (tuple): (frame, new_width) dove:
             - frame: array NumPy contenente il frame (in formato BGR).
             - new_width (int): larghezza desiderata dell'output ASCII.
+        use_cache (bool): se True, utilizza la cache per frame identici.
 
     Ritorna:
         str: stringa contenente il frame convertito in ASCII con escape ANSI.
     """
     frame, new_width = frame_data
+
+    # Crea una chiave hash per il frame e controlla nella cache
+    if use_cache:
+        # Usa un hash del frame e della dimensione come chiave di cache
+        frame_hash = hash((frame.tobytes(), new_width))
+        if frame_hash in _ANSI_CACHE:
+            return _ANSI_CACHE[frame_hash]
+
     height, width = frame.shape[:2]
     aspect_ratio = height / width
     new_height = int(aspect_ratio * new_width * 0.5)
 
-    # Ridimensiona il frame (operazione eseguita in C)
-    resized = cv2.resize(frame, (new_width, new_height))
-    # Converte il frame da BGR a RGB
-    rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    # Ridimensiona il frame
+    resized = cv2.resize(frame, (new_width, new_height),
+                         interpolation=cv2.INTER_AREA)  # INTER_AREA è migliore per il downsampling
 
-    # Calcola la luminosità come media dei canali RGB
-    brightness = np.mean(rgb_frame, axis=2).astype(np.uint8)
-    # Mappa la luminosità in un indice per la LUT
-    char_indices = (brightness.astype(np.uint16) * (len(ASCII_CHARS) - 1) // 255).astype(np.uint8)
+    # Converte il frame da BGR a RGB (solo se necessario)
+    # Nota: possiamo evitare la conversione se lavoriamo direttamente in BGR
+    rgb_frame = resized  # Usiamo BGR direttamente per evitare una conversione
+
+    # Calcola la luminosità come media ponderata dei canali BGR (più accurata per la percezione umana)
+    # Usiamo i pesi standard per la luminanza: 0.299 R, 0.587 G, 0.114 B
+    # In BGR: 0.114 B, 0.587 G, 0.299 R
+    brightness = np.dot(resized, [0.114, 0.587, 0.299]).astype(np.uint8)
+
+    # Mappa la luminosità in un indice per la LUT (pre-calcola la divisione)
+    scale_factor = (len(ASCII_CHARS) - 1) / 255.0
+    char_indices = (brightness * scale_factor).astype(np.uint8)
     ascii_chars = ASCII_LUT[char_indices]
 
-    # Converte ciascun canale RGB in stringa
-    r_str = np.char.mod("%d", rgb_frame[:, :, 0])
-    g_str = np.char.mod("%d", rgb_frame[:, :, 1])
-    b_str = np.char.mod("%d", rgb_frame[:, :, 2])
+    # Ottimizza la generazione della stringa finale
+    rows = []
+    for y in range(new_height):
+        row_chars = []
+        for x in range(new_width):
+            b, g, r = resized[y, x]  # BGR
+            char = ascii_chars[y, x]
 
-    # Costruisce la stringa ANSI per ciascun pixel:
-    # Formato: "\033[38;2;{r};{g};{b}m{char}\033[0m"
-    prefix = "\033[38;2;"
-    mid = "m"
-    suffix = "\033[0m"
-    ansi = np.char.add(prefix, r_str)
-    ansi = np.char.add(ansi, ";")
-    ansi = np.char.add(ansi, g_str)
-    ansi = np.char.add(ansi, ";")
-    ansi = np.char.add(ansi, b_str)
-    ansi = np.char.add(ansi, mid)
-    ansi = np.char.add(ansi, ascii_chars)
-    ansi = np.char.add(ansi, suffix)
+            # Usa la cache per sequenze ANSI
+            ansi_seq = _get_ansi_sequence(r, g, b, char)
+            row_chars.append(ansi_seq)
 
-    # Unisce le righe per ottenere la stringa finale
-    ascii_str = "\n".join("".join(row) for row in ansi)
+        rows.append("".join(row_chars))
+
+    ascii_str = "\n".join(rows)
+
+    # Memorizza il risultato nella cache se richiesto
+    if use_cache:
+        # Limita la dimensione della cache (implementa un semplice LRU)
+        if len(_ANSI_CACHE) > 100:  # Mantieni massimo 100 frame in cache
+            # Rimuovi un elemento casuale (implementazione semplificata di LRU)
+            _ANSI_CACHE.pop(next(iter(_ANSI_CACHE)))
+
+        _ANSI_CACHE[frame_hash] = ascii_str
+
     return ascii_str
 
 
@@ -269,9 +306,9 @@ def convert_frames(raw_queue, ascii_queue, pool, batch_size, new_width, stop_eve
 
 
 @jit(nopython=True)
-def fast_diff_lines(new_lines: List[str], old_lines: List[str], max_lines: int) -> List[int]:
+def fast_diff_lines(new_lines, old_lines, max_lines):
     """
-    Computazione accelerata delle differenze tra righe mediante Numba JIT.
+    Calcola in modo accelerato le differenze tra due liste di righe utilizzando Numba JIT.
 
     Parametri:
         new_lines (List[str]): Lista delle nuove righe.
@@ -279,105 +316,251 @@ def fast_diff_lines(new_lines: List[str], old_lines: List[str], max_lines: int) 
         max_lines (int): Numero massimo di righe da confrontare.
 
     Ritorna:
-        List[int]: Indici delle righe che risultano differenti.
+        numpy.ndarray: Array degli indici delle righe che risultano differenti.
+
+    Suggerimento:
+        Restituendo direttamente lo slice dell'array pre-allocato si evita
+        il ciclo Python per la conversione in lista, riducendo l'overhead.
     """
-    diff_indices = []  # Lista per salvare gli indici delle righe modificate
     n_new = len(new_lines)
     n_old = len(old_lines)
+
+    # Pre-allocazione per il numero massimo di differenze possibili
+    max_possible_diffs = min(max_lines, max(n_new, n_old))
+    temp_indices = np.empty(max_possible_diffs, dtype=np.int32)
+    diff_count = 0
+
     for i in range(max_lines):
-        # Se entrambi gli indici sono fuori dai limiti, passa al prossimo ciclo
+        # Se entrambi gli indici sono fuori dai limiti, passa al ciclo successivo
         if i >= n_new and i >= n_old:
             continue
 
         new_line = new_lines[i] if i < n_new else ""
         old_line = old_lines[i] if i < n_old else ""
 
-        # Se le lunghezze sono differenti, la riga va aggiornata
+        # Verifica rapida sulla lunghezza
         if len(new_line) != len(old_line):
-            diff_indices.append(i)
+            temp_indices[diff_count] = i
+            diff_count += 1
             continue
 
-        # Confronto carattere per carattere
-        for j in range(len(new_line)):
-            if j >= len(old_line) or new_line[j] != old_line[j]:
-                diff_indices.append(i)
-                break
+        # Se le righe sono identiche, non c'è bisogno di ulteriori controlli
+        if new_line == old_line:
+            continue
 
-    return diff_indices
+        # Le righe sono diverse anche se di stessa lunghezza
+        temp_indices[diff_count] = i
+        diff_count += 1
+
+    # Restituisce solo la parte dell'array contenente indici utili
+    return temp_indices[:diff_count]
 
 
-def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_performance=False):
+def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_performance=False, cache_size=10):
     """
-    Legge i frame ASCII dalla ascii_queue e aggiorna parzialmente il display
-    del terminale utilizzando sys.stdout.write con calcolo accelerato delle differenze.
-    Vengono riscritte solo le righe modificate.
+    Legge i frame ASCII dalla coda e aggiorna parzialmente il display del terminale.
+    Vengono riscritte solo le righe modificate, sfruttando un confronto differenziale e
+    diverse ottimizzazioni (cache di frame e di sequenze escape).
 
     Parametri:
-        ascii_queue (Queue): coda dei frame ASCII, contenente tuple (ascii_frame, conversion_time_ms).
-        stop_event (threading.Event): evento per terminare il ciclo.
-        log_fps (bool): se True, logga il numero di aggiornamenti al secondo.
-        log_performance (bool): se True, logga il tempo impiegato nel rendering.
+        ascii_queue (Queue): Coda contenente tuple (ascii_frame, conversion_time_ms).
+        stop_event (threading.Event): Evento per terminare il ciclo di rendering.
+        log_fps (bool): Se True, logga il numero di aggiornamenti al secondo.
+        log_performance (bool): Se True, logga i tempi di rendering per frame.
+        cache_size (int): Dimensione della cache per le sequenze escape precompilate.
+
+    Suggerimenti integrati:
+        - In sezione 3d (diff calculation), l'uso dello slice restituito da fast_diff_lines
+          riduce il sovraccarico della conversione in lista.
+        - In sezione 3e (screen output), viene eseguito l'output solo se il buffer non è vuoto,
+          evitando chiamate superflue al terminale in caso di frame invariati.
     """
+    section_times = collections.defaultdict(list)
+
     prev_frame_lines = None
     prev_terminal_size = shutil.get_terminal_size()
     frame_counter = 0
     fps_count = 0
     fps_start = time.perf_counter()
 
-    # Sequenze di escape precompilate
+    # Sequenze di escape precompilate per gestire il cursore e lo screen clear
     HIDE_CURSOR = "\033[?25l"
     SHOW_CURSOR = "\033[?25h"
     CLEAR_SCREEN = "\033[2J\033[H"
-    GOTO_FORMAT = "\033[{};1H"
 
+    # Cache per le sequenze goto_line (precompilate per le prime 500 posizioni)
+    goto_cache = {i: f"\033[{i};1H" for i in range(1, 501)}
+
+    # Cache per pattern di linee comuni per evitare ricalcoli
+    line_pattern_cache = {}
+
+    # Cache per i frame per evitare calcoli ridondanti
+    frame_cache = {}
+    max_cache_entries = cache_size
+
+    # Buffer per accumulare l'output da scrivere sul terminale
     output_buffer = []
 
-    # Nasconde il cursore
+    cache_stats_interval = 100  # Ogni quanti frame vengono registrate le statistiche di cache
+
+    slow_frames = 0
+    threshold_ms = 1000  # Soglia in ms per considerare un frame lento
+
+    # Nascondiamo il cursore
     sys.stdout.write(HIDE_CURSOR)
     sys.stdout.flush()
 
+    def time_section(section_name):
+        """
+        Funzione di supporto per misurare il tempo di esecuzione di una sezione.
+
+        Parametri:
+            section_name (str): Nome della sezione da misurare.
+
+        Ritorna:
+            function: Lambda che registra il tempo trascorso nella sezione.
+        """
+        start_time = time.perf_counter()
+        return lambda: section_times[section_name].append((time.perf_counter() - start_time) * 1000)
+
     try:
         while not stop_event.is_set():
+            frame_start = time.perf_counter()
+
+            # SEZIONE 1: Lettura dalla coda
+            end_section1 = time_section("1_queue_read")
             try:
                 ascii_frame, conversion_time_ms = ascii_queue.get(timeout=0.01)
+                end_section1()
             except queue.Empty:
-                #time.sleep(0.001)
+                end_section1()
                 continue
 
             if log_performance:
                 rendering_start = time.perf_counter()
 
+            # SEZIONE 2: Verifica se il frame è in cache
+            end_section2 = time_section("2_frame_cache_check")
+            frame_hash = hash(ascii_frame)
+            cache_hit = frame_hash in frame_cache
+            end_section2()
+
+            if cache_hit:
+                # SEZIONE 3A: Utilizzo del frame dalla cache
+                end_section3a = time_section("3a_cache_hit_output")
+                cached_output = frame_cache[frame_hash]
+                sys.stdout.write(cached_output)
+                sys.stdout.flush()
+                end_section3a()
+
+                if log_performance:
+                    rendering_end = time.perf_counter()
+                    total_rendering_time_ms = (rendering_end - rendering_start) * 1000
+                    logging.info(
+                        f"Frame {frame_counter} (CACHED) - Conversion: {conversion_time_ms:.2f} ms, "
+                        f"Total Rendering: {total_rendering_time_ms:.2f} ms"
+                    )
+
+                frame_counter += 1
+                fps_count += 1
+
+                # SEZIONE 4: Calcolo FPS
+                end_section4 = time_section("4_fps_calculation")
+                now = time.perf_counter()
+                elapsed = now - fps_start
+                if elapsed >= 1.0:
+                    if log_fps:
+                        logging.info(f"[LOG] FPS display (sys partial): {fps_count / elapsed:.1f}")
+                    fps_count = 0
+                    fps_start = now
+                end_section4()
+
+                # Registra il tempo totale del frame
+                frame_time_ms = (time.perf_counter() - frame_start) * 1000
+                section_times["total_frame_time"].append(frame_time_ms)
+                if frame_time_ms > threshold_ms:
+                    slow_frames += 1
+                    logging.warning(f"Frame lento rilevato: {frame_time_ms:.2f}ms (cache hit)")
+
+                continue
+
+            # SEZIONE 3B: Elaborazione del frame non presente in cache
+            end_section3b = time_section("3b_process_new_frame")
             frame_lines = ascii_frame.split("\n")
             current_terminal_size = shutil.get_terminal_size()
             terminal_resized = current_terminal_size != prev_terminal_size
+            end_section3b()
 
+            # SEZIONE 3C: Gestione del resize del terminale
+            end_section3c = time_section("3c_terminal_resize")
             if terminal_resized:
                 sys.stdout.write(CLEAR_SCREEN)
                 sys.stdout.flush()
                 prev_frame_lines = None
                 prev_terminal_size = current_terminal_size
+                frame_cache.clear()  # Invalida la cache in caso di resize
+            end_section3c()
 
             output_buffer.clear()
 
+            # SEZIONE 3D: Calcolo delle differenze tra il frame corrente e il precedente
+            end_section3d = time_section("3d_diff_calculation")
             if prev_frame_lines is None:
                 output_buffer.append(ascii_frame)
             else:
                 max_lines = max(len(frame_lines), len(prev_frame_lines))
+                diff_start = time.perf_counter()
+                # Otteniamo gli indici delle linee modificate; il risultato è un array NumPy per maggiore efficienza
                 diff_indices = fast_diff_lines(frame_lines, prev_frame_lines, max_lines)
+                diff_time = (time.perf_counter() - diff_start) * 1000
+                section_times["3d1_fast_diff"].append(diff_time)
+
+                # SEZIONE 3D-2: Costruzione del buffer di output per le linee modificate
+                format_start = time.perf_counter()
                 for i in diff_indices:
-                    if i < len(frame_lines):
-                        new_line = frame_lines[i]
-                        if i < len(prev_frame_lines):
-                            old_line = prev_frame_lines[i]
+                    idx = int(i)  # Garantiamo che l'indice sia un intero
+                    if idx < len(frame_lines):
+                        new_line = frame_lines[idx]
+                        if idx < len(prev_frame_lines):
+                            old_line = prev_frame_lines[idx]
                             if len(new_line) < len(old_line):
                                 new_line += " " * (len(old_line) - len(new_line))
-                        output_buffer.append(f"{GOTO_FORMAT.format(i + 1)}{new_line}")
 
+                        # Utilizza la cache per la sequenza goto se disponibile
+                        if idx + 1 in goto_cache:
+                            goto_sequence = goto_cache[idx + 1]
+                        else:
+                            goto_sequence = f"\033[{idx + 1};1H"
+                            goto_cache[idx + 1] = goto_sequence
+
+                        # Verifica se la combinazione (indice, linea) è già in cache
+                        line_key = (idx, new_line)
+                        if line_key in line_pattern_cache:
+                            output_buffer.append(line_pattern_cache[line_key])
+                        else:
+                            formatted_line = f"{goto_sequence}{new_line}"
+                            line_pattern_cache[line_key] = formatted_line
+                            output_buffer.append(formatted_line)
+                format_time = (time.perf_counter() - format_start) * 1000
+                section_times["3d2_format_lines"].append(format_time)
+            end_section3d()
+
+            # SEZIONE 3E: Output sullo schermo
+            end_section3e = time_section("3e_screen_output")
+            # Se il buffer di output contiene qualcosa, procediamo con la scrittura
             if output_buffer:
-                sys.stdout.write("".join(output_buffer))
+                output_text = "".join(output_buffer)
+                sys.stdout.write(output_text)
                 sys.stdout.flush()
+            end_section3e()
 
+            # SEZIONE 3F: Aggiornamento della cache dei frame
+            end_section3f = time_section("3f_cache_update")
+            if len(frame_cache) >= max_cache_entries:
+                frame_cache.pop(next(iter(frame_cache)))
+            frame_cache[frame_hash] = "".join(output_buffer) if output_buffer else ""
             prev_frame_lines = frame_lines
+            end_section3f()
 
             if log_performance:
                 rendering_end = time.perf_counter()
@@ -391,14 +574,77 @@ def render_frames_sys_partial(ascii_queue, stop_event, log_fps=False, log_perfor
             frame_counter += 1
             fps_count += 1
 
+            # SEZIONE 4: Calcolo FPS e manutenzione
+            end_section4 = time_section("4_fps_and_maintenance")
             now = time.perf_counter()
             elapsed = now - fps_start
             if elapsed >= 1.0:
                 if log_fps:
                     logging.info(f"[LOG] FPS display (sys partial): {fps_count / elapsed:.1f}")
+                    if log_performance and section_times:
+                        for section, times in sorted(section_times.items()):
+                            if times:
+                                avg_time = sum(times) / len(times)
+                                max_time = max(times)
+                                logging.info(f"Sezione {section}: Medio {avg_time:.2f} ms, Max {max_time:.2f} ms")
+                        slowest_section = max(section_times.items(),
+                                              key=lambda x: sum(x[1]) / len(x[1]) if x[1] else 0)
+                        logging.info(f"Sezione piu lenta: {slowest_section[0]}")
+
+                        # Resetta le statistiche dopo il log
+                        for section in section_times:
+                            section_times[section] = []
                 fps_count = 0
                 fps_start = now
+
+                # Pulizia periodica della cache dei pattern di linea per evitare crescita eccessiva
+                if len(line_pattern_cache) > 1000:
+                    line_pattern_cache.clear()
+            end_section4()
+
+            # Registra il tempo totale del frame
+            frame_time_ms = (time.perf_counter() - frame_start) * 1000
+            section_times["total_frame_time"].append(frame_time_ms)
+
+            # Segnala se il frame è lento
+            if frame_time_ms > threshold_ms:
+                slow_frames += 1
+                logging.warning(f"Frame lento rilevato: {frame_time_ms:.2f}ms (cache miss)")
+
+            # Registrazione periodica delle statistiche della cache
+            if frame_counter % cache_stats_interval == 0:
+                logging.info(f"Statistiche cache - Frame: {frame_counter}, "
+                             f"Frame cache: {len(frame_cache)}/{max_cache_entries}, "
+                             f"Line pattern cache: {len(line_pattern_cache)}, "
+                             f"Frame lenti: {slow_frames}")
+
+                # if log_performance and section_times:
+                #     for section, times in sorted(section_times.items()):
+                #         if times:
+                #             avg_time = sum(times) / len(times)
+                #             max_time = max(times)
+                #             logging.info(f"Sezione {section}: Medio {avg_time:.2f} ms, Max {max_time:.2f} ms")
+                #     slowest_section = max(section_times.items(),
+                #                           key=lambda x: sum(x[1]) / len(x[1]) if x[1] else 0)
+                #     logging.info(f"Sezione piu lenta: {slowest_section[0]}")
+                #
+                #     # Resetta le statistiche dopo il log
+                #     for section in section_times:
+                #         section_times[section] = []
     finally:
+        # Statistiche finali di profilazione
+        if log_performance and section_times:
+            logging.info("=== Statistiche finali di profilazione ===")
+            for section, times in sorted(section_times.items()):
+                if times:
+                    avg_time = sum(times) / len(times)
+                    max_time = max(times)
+                    logging.info(f"Sezione {section}: Medio {avg_time:.2f} ms, Max {max_time:.2f} ms, "
+                                 f"Campioni: {len(times)}")
+            if slow_frames > 0:
+                logging.info(f"Totale frame lenti: {slow_frames}/{frame_counter} "
+                             f"({slow_frames / frame_counter * 100:.1f}%)")
+
         try:
             term_height = shutil.get_terminal_size().lines
         except Exception:
@@ -823,7 +1069,7 @@ def main():
     render_calibration_frame(args.width, new_height)
 
     # Calcola la dimensione delle code in base agli FPS richiesti
-    buffer_seconds = 2  # Quanti secondi di buffer vogliamo
+    buffer_seconds = 5  # Quanti secondi di buffer vogliamo
     queue_size = max(args.fps * buffer_seconds, args.fps * 3)
 
     raw_queue = Queue(maxsize=queue_size)
