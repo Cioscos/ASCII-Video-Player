@@ -1040,7 +1040,7 @@ def main():
         description="Real-time ASCII video using a parallel pipeline with separate conversion and rendering."
     )
     parser.add_argument("video_path", type=str, help="Path to the video file")
-    parser.add_argument("width", type=int, help="Width of the ASCII output")
+    parser.add_argument("width", type=int, default=100, help="Width of the ASCII output")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second for extraction (default: 10)")
     parser.add_argument("--log_fps", action="store_true", help="Enable logging of display FPS")
     parser.add_argument("--log_performance", action="store_true", help="Enable logging of conversion and rendering performance")
