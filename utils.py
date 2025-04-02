@@ -26,7 +26,7 @@ def setup_logging():
 
     # Configurazione logger
     logger = logging.getLogger('ascii_video')
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     # Handler per il file
     file_handler = logging.FileHandler(log_filename)

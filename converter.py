@@ -1,7 +1,13 @@
 """
-Funzioni per convertire frame video in ASCII art colorata.
+Funzioni ottimizzate per convertire frame video in ASCII art colorata.
 """
 import cv2
+import numpy as np
+
+# Pre-calcola la palette ASCII
+ASCII_CHARS = "@%#*+=-:. "
+ASCII_CHARS_LEN = len(ASCII_CHARS)
+ASCII_INDICES = np.arange(0, 256)  # Mappatura da luminosità (0-255) a indice ASCII
 
 def resize_frame(frame, width):
     """
@@ -20,7 +26,9 @@ def resize_frame(frame, width):
     # Il terminale ha un rapporto altezza/larghezza carattere di circa 2:1,
     # quindi moltiplichiamo per 0.5 per ottenere un aspect ratio corretto
     new_height = int(width * aspect_ratio * 0.5)
-    return cv2.resize(frame, (width, new_height)), new_height
+
+    # Usa INTER_AREA per downscaling (più veloce e migliore per ridurre dimensioni)
+    return cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_AREA), new_height
 
 def frame_to_ascii(frame, width):
     """
@@ -37,39 +45,41 @@ def frame_to_ascii(frame, width):
     # Ridimensiona il frame
     resized_frame, height = resize_frame(frame, width)
 
-    # Palette di caratteri ASCII ordinata per intensità (dal più scuro al più chiaro)
-    ascii_chars = "@%#*+=-:. "
+    # Pre-allocazione di memoria per le stringhe di output
+    rows = []
+    last_color = None
 
-    # Crea una matrice per memorizzare gli indici dei caratteri e i colori
-    ascii_matrix = []
+    # Calcola la luminosità per l'intero frame in una volta sola
+    # Formula: 0.2126*R + 0.7152*G + 0.0722*B
+    luminosity = np.dot(resized_frame[..., :3], [0.0722, 0.7152, 0.2126])
 
+    # Mappa la luminosità agli indici della palette ASCII
+    ascii_indices = (luminosity / 255 * (ASCII_CHARS_LEN - 1)).astype(int)
+
+    # Costruisci ciascuna riga in modo ottimizzato
     for y in range(height):
-        ascii_row = []
+        row_chars = []
         for x in range(width):
             # Ottieni i valori BGR per il pixel corrente
             b, g, r = resized_frame[y, x]
 
-            # Calcola la luminosità (0-255)
-            brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            # Ottieni il carattere ASCII corrispondente alla luminosità
+            char_idx = ascii_indices[y, x]
+            char = ASCII_CHARS[char_idx]
 
-            # Mappa la luminosità a un indice nella palette ASCII
-            ascii_index = int(brightness / 255 * (len(ascii_chars) - 1))
-            ascii_char = ascii_chars[ascii_index]
+            # Ottimizzazione: cambia il colore solo se diverso dall'ultimo usato
+            color = (r, g, b)
+            if color != last_color:
+                row_chars.append(f"\033[38;2;{r};{g};{b}m{char}")
+                last_color = color
+            else:
+                row_chars.append(char)
 
-            # Salva carattere e colore
-            ascii_row.append((ascii_char, (r, g, b)))
+        # Unisci tutti i caratteri della riga in una sola stringa
+        rows.append("".join(row_chars))
 
-        ascii_matrix.append(ascii_row)
-
-    # Genera la stringa ASCII colorata
-    colored_ascii = ""
-    for row in ascii_matrix:
-        for char, (r, g, b) in row:
-            # Sequenza ANSI per impostare il colore (formato: \033[38;2;R;G;Bm)
-            colored_ascii += f"\033[38;2;{r};{g};{b}m{char}"
-        colored_ascii += "\033[0m\n"  # Reset colore e nuova riga
-
-    return colored_ascii, height
+    # Unisci tutte le righe con newline e reset del colore alla fine di ogni riga
+    return "\n".join(r + "\033[0m" for r in rows), height
 
 def batch_process_frames(frames_batch, width):
     """
@@ -82,9 +92,17 @@ def batch_process_frames(frames_batch, width):
     Ritorna:
         list: Lista di frame ASCII elaborati.
     """
+    # Pre-allocazione dell'array di output
     ascii_frames = []
+
+    # Controllo di sicurezza per evitare operazioni inutili
+    if not frames_batch:
+        return ascii_frames
+
+    # Ottimizzazione: elabora i frame in batch
     for frame in frames_batch:
         if frame is not None:
             ascii_frame, _ = frame_to_ascii(frame, width)
             ascii_frames.append(ascii_frame)
+
     return ascii_frames

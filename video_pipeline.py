@@ -222,7 +222,11 @@ class VideoPipeline:
         """
         batch = []
 
-        while self.running:
+        # Buffer per tracciare le metriche di conversione
+        conversion_count = 0
+        total_conversion_time = 0
+
+        while self.running and not self.stop_requested:
             try:
                 # Preleva un frame dalla coda
                 frame = self.raw_frame_queue.get(block=True, timeout=0.1)
@@ -233,8 +237,17 @@ class VideoPipeline:
                     if batch:
                         start_time = time.time()
                         ascii_frames = batch_process_frames(batch, self.width)
+                        conversion_time = time.time() - start_time
+
                         if self.log_performance:
-                            self.conversion_times.append(time.time() - start_time)
+                            self.conversion_times.append(conversion_time)
+
+                            # Aggiorna le metriche di conversione
+                            conversion_count += 1
+                            total_conversion_time += conversion_time
+                            avg_time = total_conversion_time / conversion_count
+                            self.logger.debug(
+                                f"Conversione batch #{conversion_count}: {conversion_time * 1000:.2f}ms (media: {avg_time * 1000:.2f}ms)")
 
                         # Metti i frame ASCII in coda
                         for ascii_frame in ascii_frames:
@@ -251,16 +264,26 @@ class VideoPipeline:
                 if len(batch) >= self.batch_size:
                     start_time = time.time()
                     ascii_frames = batch_process_frames(batch, self.width)
+                    conversion_time = time.time() - start_time
+
                     if self.log_performance:
-                        self.conversion_times.append(time.time() - start_time)
+                        self.conversion_times.append(conversion_time)
+
+                        # Aggiorna le metriche di conversione
+                        conversion_count += 1
+                        total_conversion_time += conversion_time
+                        avg_time = total_conversion_time / conversion_count
+                        self.logger.debug(
+                            f"Conversione batch #{conversion_count}: {conversion_time * 1000:.2f}ms (media: {avg_time * 1000:.2f}ms)")
 
                     # Metti i frame ASCII in coda
                     for ascii_frame in ascii_frames:
                         try:
                             self.ascii_frame_queue.put(ascii_frame, block=True, timeout=0.1)
                         except queue.Full:
-                            # Se la coda è piena, aspetta un po'
-                            time.sleep(0.01)
+                            # Se la coda è piena, rileva e registra nei log
+                            if not self.stop_requested:
+                                self.logger.warning("Coda dei frame ASCII piena, frame saltato")
 
                     # Svuota il batch
                     batch = []
@@ -269,8 +292,9 @@ class VideoPipeline:
                 # Se la coda è vuota, aspetta un po'
                 time.sleep(0.01)
             except Exception as e:
-                print(f"Errore nel thread converter: {e}")
+                self.logger.error(f"Errore nel thread converter: {e}", exc_info=True)
                 self.running = False
+                self.stop_requested = True
                 break
 
     def _frame_renderer(self):
