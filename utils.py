@@ -33,14 +33,8 @@ def setup_logging():
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
 
-    # Handler per la console
-    console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter('%(levelname)s: %(message)s')
-    console_handler.setFormatter(console_formatter)
-
     # Aggiungi gli handler al logger
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
 
     logger.info(f"Log inizializzato in: {log_filename}")
 

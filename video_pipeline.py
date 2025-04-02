@@ -7,13 +7,14 @@ import queue
 import time
 from converter import batch_process_frames
 from terminal import print_frame, hide_cursor, show_cursor, clear_terminal
+from utils import setup_logging
 
 class VideoPipeline:
     """
     Pipeline parallela per l'elaborazione e la visualizzazione di video ASCII.
     """
 
-    def __init__(self, video_path, width, fps=10, log_fps=False, log_performance=False, batch_size=1):
+    def __init__(self, video_path, width, fps=10, log_fps=False, log_performance=False, batch_size=1, logger=None):
         """
         Inizializza la pipeline video.
 
@@ -47,8 +48,7 @@ class VideoPipeline:
         self.display_fps = []
 
         # Inizializza il logger
-        from utils import setup_logging
-        self.logger = setup_logging()
+        self.logger = setup_logging() if not logger else logger
 
     def start(self):
         """

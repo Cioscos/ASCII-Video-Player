@@ -73,29 +73,30 @@ def main():
         sys.exit(1)
 
     try:
-        # Leggi le dimensioni del video per determinare l'aspect ratio
+        # Apertura video per ottenere le dimensioni iniziali
         cap = cv2.VideoCapture(args.video_path)
         if not cap.isOpened():
-            logger.error(f"Il file video '{args.video_path}' non esiste o non può essere aperto.")
-            print(f"Errore: Il file video '{args.video_path}' non esiste o non può essere aperto.")
+            logger.error("Impossibile aprire il video.")
+            print("Errore: impossibile aprire il video.")
             sys.exit(1)
 
-        # Ottieni le dimensioni del video
-        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        cap.release()  # Rilascia le risorse
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            logger.error("Impossibile leggere il primo frame.")
+            print("Errore: impossibile leggere il primo frame.")
+            sys.exit(1)
 
-        # Calcola l'aspect ratio del video (altezza/larghezza)
-        video_aspect_ratio = video_height / video_width if video_width > 0 else 9 / 16
-        logger.info(f"Dimensioni video: {video_width}x{video_height}, Aspect ratio: {video_aspect_ratio:.4f}")
+        height, width_frame = frame.shape[:2]
+        aspect_ratio = height / width_frame
+        new_height = int(aspect_ratio * args.width * 0.45)  # Altezza adattata
 
-        # Stima l'altezza basata sulla larghezza e sull'aspect ratio del video
-        estimated_height = estimate_height(args.width, video_aspect_ratio)
-        logger.info(f"Dimensioni dell'output ASCII stimate: {args.width}x{estimated_height}")
+        logger.info(f"Dimensioni video originali: {width_frame}x{height}, Aspect ratio: {aspect_ratio:.4f}")
+        logger.info(f"Dimensioni dell'output ASCII: {args.width}x{new_height}")
 
         # Mostra il frame di calibrazione
         logger.info("Mostrando il frame di calibrazione...")
-        render_calibration_frame(args.width, estimated_height)
+        render_calibration_frame(args.width, new_height)
         logger.info("Calibrazione completata, avvio rendering...")
 
         # Crea e avvia la pipeline video
@@ -105,7 +106,8 @@ def main():
             fps=args.fps,
             log_fps=args.log_fps,
             log_performance=args.log_performance,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            logger=logger
         )
 
         # Avvia la pipeline
