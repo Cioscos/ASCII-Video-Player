@@ -35,7 +35,7 @@ class VideoPipeline:
 
         # Code per la comunicazione tra thread
         self.raw_frame_queue = queue.Queue(maxsize=30)  # Buffer limitato
-        self.ascii_frame_queue = queue.Queue(maxsize=30)
+        self.ascii_frame_queue = queue.Queue(maxsize=60)
 
         # Flag di controllo
         self.running = False
@@ -299,15 +299,13 @@ class VideoPipeline:
 
     def _frame_renderer(self):
         """
-        Thread che mostra i frame ASCII nel terminale.
-
-        Prende i frame ASCII dalla coda ascii_frame_queue
-        e li visualizza nel terminale.
+        Thread che mostra i frame ASCII nel terminale con aggiornamento parziale.
         """
         last_fps_check = time.time()
         frames_count = 0
+        previous_frame = None  # Traccia il frame precedente
 
-        while self.running:
+        while self.running and not self.stop_requested:
             try:
                 # Preleva un frame ASCII dalla coda
                 ascii_frame = self.ascii_frame_queue.get(block=True, timeout=0.1)
@@ -316,9 +314,10 @@ class VideoPipeline:
                 if ascii_frame is None:
                     break
 
-                # Stampa il frame
+                # Stampa il frame, passando il frame precedente per l'aggiornamento parziale
                 start_time = time.time()
-                print_frame(ascii_frame)
+                previous_frame = print_frame(ascii_frame, previous_frame)
+
                 if self.log_performance:
                     self.render_times.append(time.time() - start_time)
 
@@ -341,8 +340,9 @@ class VideoPipeline:
                 # Se la coda è vuota, aspetta un po'
                 time.sleep(0.01)
             except Exception as e:
-                print(f"Errore nel thread renderer: {e}")
+                self.logger.error(f"Errore nel thread renderer: {e}", exc_info=True)
                 self.running = False
+                self.stop_requested = True
                 break
 
     def _print_performance_stats(self):
