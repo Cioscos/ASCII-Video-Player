@@ -113,14 +113,66 @@ def show_cursor():
     sys.stdout.flush()
 
 
-def print_frame(frame_str):
+def print_frame(frame_str, previous_frame=None):
     """
-    Stampa un frame ASCII nel terminale.
+    Stampa un frame ASCII nel terminale, aggiornando solo le parti modificate
+    con un algoritmo ottimizzato per sequenze di caratteri.
 
     Parametri:
         frame_str (str): Stringa ASCII da visualizzare.
+        previous_frame (str): Frame precedente per confronto.
+
+    Ritorna:
+        str: Il frame corrente per uso futuro.
     """
+    if previous_frame is None or len(previous_frame) != len(frame_str):
+        # Primo frame o dimensioni cambiate - renderizza tutto
+        sys.stdout.write("\033[H")  # Posiziona il cursore all'inizio
+        sys.stdout.write(frame_str)
+        sys.stdout.flush()
+        return frame_str
+
+    # Dividi i frame in righe
+    current_lines = frame_str.split('\n')
+    previous_lines = previous_frame.split('\n')
+
     # Posiziona il cursore all'inizio
     sys.stdout.write("\033[H")
-    sys.stdout.write(frame_str)
+
+    # Algoritmo di rendering ottimizzato per segmenti
+    for y, (curr_line, prev_line) in enumerate(zip(current_lines, previous_lines)):
+        if curr_line == prev_line:
+            continue  # Salta le righe identiche
+
+        # Trova i segmenti modificati nella riga
+        x = 0
+        while x < len(curr_line):
+            # Trova l'inizio di un segmento modificato
+            if x < len(prev_line) and curr_line[x] == prev_line[x]:
+                x += 1
+                continue
+
+            # Segmento diverso trovato, trova la fine del segmento
+            start_x = x
+
+            # Cerca l'inizio del prossimo segmento uguale o la fine della riga
+            while x < len(curr_line) and (x >= len(prev_line) or curr_line[x] != prev_line[x]):
+                x += 1
+
+                # Ottimizzazione: continua finché troviamo caratteri che contengono sequenze di colore
+                if x < len(curr_line) and curr_line[x] == '\033':
+                    continue
+
+            # Ora abbiamo un segmento diverso da start_x a x
+            segment = curr_line[start_x:x]
+
+            # Se il segmento contiene solo spazi e il precedente era spazi, ottimizza
+            if segment.strip() == "" and start_x < len(prev_line) and prev_line[start_x:x].strip() == "":
+                continue
+
+            # Posiziona il cursore e aggiorna il segmento
+            sys.stdout.write(f"\033[{y + 1};{start_x + 1}H")
+            sys.stdout.write(segment)
+
     sys.stdout.flush()
+    return frame_str
