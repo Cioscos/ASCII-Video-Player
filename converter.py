@@ -30,18 +30,15 @@ def resize_frame(frame, width):
     # Usa INTER_AREA per downscaling (più veloce e migliore per ridurre dimensioni)
     return cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_AREA), new_height
 
-def frame_to_ascii(frame, width):
-    """
-    Converte un frame in una rappresentazione ASCII colorata.
 
-    Parametri:
-        frame (numpy.ndarray): Frame da convertire.
-        width (int): Larghezza desiderata in caratteri.
-
-    Ritorna:
-        str: Rappresentazione ASCII colorata del frame.
-        int: Altezza del frame ASCII.
+def frame_to_ascii(frame, width, color_cache=None):
     """
+    Converte un frame in una rappresentazione ASCII colorata con cache dei colori.
+    """
+    # Inizializza la cache se non esiste
+    if color_cache is None:
+        color_cache = {}
+
     # Ridimensiona il frame
     resized_frame, height = resize_frame(frame, width)
 
@@ -50,7 +47,6 @@ def frame_to_ascii(frame, width):
     last_color = None
 
     # Calcola la luminosità per l'intero frame in una volta sola
-    # Formula: 0.2126*R + 0.7152*G + 0.0722*B
     luminosity = np.dot(resized_frame[..., :3], [0.0722, 0.7152, 0.2126])
 
     # Mappa la luminosità agli indici della palette ASCII
@@ -63,6 +59,11 @@ def frame_to_ascii(frame, width):
             # Ottieni i valori BGR per il pixel corrente
             b, g, r = resized_frame[y, x]
 
+            # Quantizza i colori (riduci la profondità di colore)
+            r = (r // 5) * 5
+            g = (g // 5) * 5
+            b = (b // 5) * 5
+
             # Ottieni il carattere ASCII corrispondente alla luminosità
             char_idx = ascii_indices[y, x]
             char = ASCII_CHARS[char_idx]
@@ -70,7 +71,11 @@ def frame_to_ascii(frame, width):
             # Ottimizzazione: cambia il colore solo se diverso dall'ultimo usato
             color = (r, g, b)
             if color != last_color:
-                row_chars.append(f"\033[38;2;{r};{g};{b}m{char}")
+                # Usa la cache per le sequenze di colore
+                if color not in color_cache:
+                    color_cache[color] = f"\033[38;2;{r};{g};{b}m"
+
+                row_chars.append(color_cache[color] + char)
                 last_color = color
             else:
                 row_chars.append(char)
