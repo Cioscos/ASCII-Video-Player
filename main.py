@@ -6,6 +6,7 @@ import logging
 
 import cv2
 
+from parallel_video_pipeline import ParallelVideoPipeline
 from terminal import render_calibration_frame, show_cursor
 from video_pipeline import VideoPipeline
 from utils import estimate_height, setup_logging
@@ -61,6 +62,7 @@ def main():
     parser.add_argument("--log_performance", action="store_true",
                         help="Enable logging of conversion and rendering performance")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
+    parser.add_argument("--parallel", action="store_true", help="Use parallel processing")
 
     args = parser.parse_args()
 
@@ -100,15 +102,27 @@ def main():
         logger.info("Calibrazione completata, avvio rendering...")
 
         # Crea e avvia la pipeline video
-        pipeline = VideoPipeline(
-            video_path=args.video_path,
-            width=args.width,
-            fps=args.fps,
-            log_fps=args.log_fps,
-            log_performance=args.log_performance,
-            batch_size=args.batch_size,
-            logger=logger
-        )
+        if args.parallel:
+            pipeline = ParallelVideoPipeline(
+                video_path=args.video_path,
+                width=args.width,
+                fps=args.fps,
+                log_fps=args.log_fps,
+                log_performance=args.log_performance,
+                batch_size=args.batch_size,
+                num_processes=None,  # Auto-determina il numero di processi
+                use_cache=True
+            )
+        else:
+            pipeline = VideoPipeline(
+                video_path=args.video_path,
+                width=args.width,
+                fps=args.fps,
+                log_fps=args.log_fps,
+                log_performance=args.log_performance,
+                batch_size=args.batch_size,
+                logger=logger
+            )
 
         # Avvia la pipeline
         pipeline.start()
