@@ -111,7 +111,8 @@ def main():
                 log_performance=args.log_performance,
                 batch_size=args.batch_size,
                 num_processes=None,  # Auto-determina il numero di processi
-                use_cache=True
+                use_cache=True,
+                logger=logger
             )
         else:
             pipeline = VideoPipeline(

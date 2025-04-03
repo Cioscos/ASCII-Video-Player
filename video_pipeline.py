@@ -299,11 +299,11 @@ class VideoPipeline:
 
     def _frame_renderer(self):
         """
-        Thread che mostra i frame ASCII nel terminale con aggiornamento parziale.
+        Thread che mostra i frame ASCII nel terminale.
         """
         last_fps_check = time.time()
         frames_count = 0
-        previous_frame = None  # Traccia il frame precedente
+        frames_rendered = 0
 
         while self.running and not self.stop_requested:
             try:
@@ -314,15 +314,17 @@ class VideoPipeline:
                 if ascii_frame is None:
                     break
 
-                # Stampa il frame, passando il frame precedente per l'aggiornamento parziale
+                # Stampa il frame (senza bisogno del frame precedente)
                 start_time = time.time()
-                previous_frame = print_frame(ascii_frame, previous_frame)
+                print_frame(ascii_frame)
+                render_time = time.time() - start_time
 
                 if self.log_performance:
-                    self.render_times.append(time.time() - start_time)
+                    self.render_times.append(render_time)
 
                 # Aggiorna il conteggio dei frame per il calcolo degli FPS
                 frames_count += 1
+                frames_rendered += 1
                 current_time = time.time()
                 elapsed = current_time - last_fps_check
 
@@ -330,11 +332,16 @@ class VideoPipeline:
                 if elapsed >= 1.0:
                     fps = frames_count / elapsed
                     if self.log_fps:
-                        print(f"\033[0m\nFPS: {fps:.2f}", end="")
+                        # Usa \033[K per cancellare il resto della riga
+                        print(f"\033[0m\nFPS: {fps:.2f} | Frames: {frames_rendered}\033[K", end="")
                     if self.log_performance:
                         self.display_fps.append(fps)
                     frames_count = 0
                     last_fps_check = current_time
+
+                    # Log dettagliato delle performance
+                    if self.log_performance and fps < self.target_fps * 0.9:
+                        self.logger.debug(f"Performance sotto target: {fps:.2f} FPS vs {self.target_fps} target")
 
             except queue.Empty:
                 # Se la coda è vuota, aspetta un po'
