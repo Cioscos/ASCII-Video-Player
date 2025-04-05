@@ -144,6 +144,8 @@ def main():
     parser.add_argument("--log_performance", action="store_true",
                         help="Enable logging of conversion and rendering performance")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
+    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended"], default="standard",
+                        help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
 
     args = parser.parse_args()
 
@@ -224,6 +226,15 @@ def main():
     sys.stdout.write(HIDE_CURSOR)
     sys.stdout.flush()
 
+    # Ottieni la palette di caratteri ASCII in base alla scelta dell'utente
+    palette_map = {
+        "basic": "@%#*+=-:. ",
+        "standard": "@%#*+=-:. WM#oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[] ",
+        "extended": "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+    }
+    ascii_palette = palette_map[args.palette]
+    logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
+
     # Inizializza la pipeline
     pipeline = VideoPipeline(
         args.video_path,
@@ -231,7 +242,8 @@ def main():
         args.fps,
         args.batch_size,
         args.log_performance,
-        args.log_fps
+        args.log_fps,
+        ascii_palette=ascii_palette
     )
 
     # Gestione dei segnali per una chiusura pulita

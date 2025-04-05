@@ -110,7 +110,7 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
         logger.info("Processo di lettura frame terminato")
 
 
-def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
+def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_palette=None):
     """
     Funzione standalone per il processo di conversione frame.
 
@@ -119,6 +119,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
         frame_queue (multiprocessing.Queue): Coda per i frame video
         ascii_queue (multiprocessing.Queue): Coda per i frame ASCII
         should_stop (multiprocessing.Event): Flag per la terminazione
+        ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
     """
     # Configura logging locale per questo processo
     logging.basicConfig(
@@ -134,7 +135,25 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
         logger.info(f"Avvio processo di conversione frame con larghezza={width}")
 
         # Caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
-        ascii_chars = np.array(list('@%#*+=-:. '))
+        # Se fornita una palette personalizzata, usala
+        if ascii_palette:
+            ascii_chars = np.array(list(ascii_palette))
+            logger.info(f"Utilizzo palette ASCII personalizzata con {len(ascii_chars)} caratteri")
+        else:
+            # Set predefinito di caratteri ASCII
+            ascii_chars = np.array(list("@%#*+=-:. "))
+            logger.info(f"Utilizzo palette ASCII predefinita con {len(ascii_chars)} caratteri")
+
+        # Cache per le mappature di luminosità
+        luminance_cache = {}
+
+        # Lookup table per i codici colore - precalcolata per velocizzare il rendering
+        color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
+        for r in range(6):
+            for g in range(6):
+                for b in range(6):
+                    color_lookup[r, g, b] = 16 + 36 * r + 6 * g + b
+
         height_scale = None
         last_shape = None
 
@@ -143,7 +162,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
 
         def convert_frame_to_ascii_color(frame):
             """
-            Converte un singolo frame in ASCII art colorata.
+            Converte un singolo frame in ASCII art colorata con vettorizzazione ottimizzata.
             """
             nonlocal height_scale, last_shape
 
@@ -162,16 +181,26 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
             if new_height < 1:
                 new_height = 1
 
-            resized = cv2.resize(frame, (width, new_height))
+            # Usa INTER_NEAREST per una conversione più veloce rispetto a INTER_LINEAR
+            resized = cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_NEAREST)
 
-            # Estrai i canali di colore
-            b, g, r = cv2.split(resized)
+            # Estrai i canali di colore in modo più efficiente
+            b = resized[:, :, 0]
+            g = resized[:, :, 1]
+            r = resized[:, :, 2]
 
             # Calcola la luminosità (scala di grigi) per scegliere il carattere
+            # Y = 0.299R + 0.587G + 0.114B (pesi ottimali per la percezione umana)
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
 
             # Normalizza i valori di grigio e mappali all'indice nell'array ascii_chars
+            # Ottimizzazione: manteniamo tutto in array numpy il più a lungo possibile
             indices = (gray / 255 * (len(ascii_chars) - 1)).astype(np.int_)
+
+            # Precalcola gli indici di colore per migliorare le prestazioni
+            r_idx = np.minimum(5, r // 43).astype(np.int_)  # 255 / 6 ≈ 43
+            g_idx = np.minimum(5, g // 43).astype(np.int_)
+            b_idx = np.minimum(5, b // 43).astype(np.int_)
 
             # Crea le stringhe ASCII con codici colore ANSI
             rows = []
@@ -181,15 +210,8 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
                     # Ottieni il carattere ASCII in base alla luminosità
                     char = ascii_chars[indices[y, x]]
 
-                    # Ottieni i valori RGB normalizzati (0-5 per terminali 256 colori)
-                    # Usiamo 6x6x6 cube per i colori in terminali 256 colori
-                    red = min(5, r[y, x] // 43)  # 255 / 6 ≈ 43
-                    green = min(5, g[y, x] // 43)
-                    blue = min(5, b[y, x] // 43)
-
-                    # Calcola il codice colore per terminali a 256 colori
-                    # Formula: 16 + 36*r + 6*g + b
-                    color_code = 16 + 36 * red + 6 * green + blue
+                    # Usa la lookup table per il codice colore (più veloce)
+                    color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
 
                     # Sequenza ANSI per impostare il colore
                     colored_char = f"\033[38;5;{color_code}m{char}"
@@ -253,7 +275,7 @@ class VideoPipeline:
     """
 
     def __init__(self, video_path, width, target_fps=None, batch_size=1,
-                 log_performance=False, log_fps=False):
+                 log_performance=False, log_fps=False, ascii_palette=None):
         """
         Inizializza la pipeline video.
 
@@ -265,6 +287,7 @@ class VideoPipeline:
             batch_size (int): Numero di frame da processare in batch
             log_performance (bool): Se True, registra le informazioni sulle prestazioni
             log_fps (bool): Se True, registra le informazioni sugli FPS
+            ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
         """
         self.video_path = video_path
         self.width = width
@@ -272,6 +295,7 @@ class VideoPipeline:
         self.batch_size = batch_size
         self.log_performance = log_performance
         self.log_fps = log_fps
+        self.ascii_palette = ascii_palette
 
         # Coda di comunicazione tra processi
         # Usiamo un maxsize per evitare di sovraccaricare la memoria
@@ -378,7 +402,7 @@ class VideoPipeline:
         # Avvia il processo di conversione frame
         self.converter_process = multiprocessing.Process(
             target=frame_converter_process,
-            args=(self.width, self.frame_queue, self.ascii_queue, self.should_stop),
+            args=(self.width, self.frame_queue, self.ascii_queue, self.should_stop, self.ascii_palette),
             daemon=True
         )
         self.converter_process.start()

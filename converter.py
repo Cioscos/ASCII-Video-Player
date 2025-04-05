@@ -30,15 +30,25 @@ class FrameConverter:
         self.width = width
         # Usa tutti i core disponibili se non specificato diversamente
         self.max_workers = max_workers or max(1, multiprocessing.cpu_count() - 1)
-        # Caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
-        self.ascii_chars = np.array(list('@%#*+=-:. '))
+
+        # Set esteso di caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
+        # Una palette più ricca offre maggiore dettaglio visivo
+        self.ascii_chars = np.array(list("$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "))
 
         # Prealloca le matrici per le operazioni di resize
         self.height_scale = None
         self.last_shape = None
 
+        # Lookup table per i codici colore - precalcolata per velocizzare il rendering
+        self.color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
+        for r in range(6):
+            for g in range(6):
+                for b in range(6):
+                    self.color_lookup[r, g, b] = 16 + 36 * r + 6 * g + b
+
         self.logger = logging.getLogger('FrameConverter')
-        self.logger.info(f"Inizializzato convertitore con width={width}, workers={self.max_workers}")
+        self.logger.info(
+            f"Inizializzato convertitore con width={width}, workers={self.max_workers}, {len(self.ascii_chars)} caratteri")
 
     def _convert_frame_to_ascii(self, frame):
         """
