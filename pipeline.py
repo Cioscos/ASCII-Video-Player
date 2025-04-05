@@ -3,7 +3,6 @@ import time
 import queue
 import threading
 import logging
-import os
 import sys
 import numpy as np
 import multiprocessing
@@ -28,15 +27,9 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
         batch_size (int): Numero di frame da processare in batch
         loop_video (bool): Se True, riavvia il video quando raggiunge la fine
     """
-    # Configura logging locale per questo processo
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - Reader - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stderr)
-        ]
-    )
-    logger = logging.getLogger("Reader")
+    # Configura logging locale per questo processo - solo errori e avvisi al terminale
+    from utils import configure_process_logging
+    logger = configure_process_logging("Reader", console_level=logging.WARNING)
 
     try:
         logger.info("Avvio processo di lettura frame")
@@ -138,15 +131,9 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
         should_stop (multiprocessing.Event): Flag per la terminazione
         ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
     """
-    # Configura logging locale per questo processo
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - Converter - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stderr)
-        ]
-    )
-    logger = logging.getLogger("Converter")
+    # Configura logging locale per questo processo - solo errori e avvisi al terminale
+    from utils import configure_process_logging
+    logger = configure_process_logging("Converter", console_level=logging.WARNING)
 
     try:
         logger.info(f"Avvio processo di conversione frame con larghezza={width}")
@@ -407,7 +394,12 @@ class VideoPipeline:
         """
         Thread che renderizza i frame ASCII sul terminale.
         """
-        self.logger.info("Avvio thread di rendering frame")
+        # Usa un logger locale invece di sovrascrivere self.logger
+        from utils import configure_process_logging
+        renderer_logger = configure_process_logging("Renderer", console_level=logging.WARNING)
+
+        renderer_logger.info("Avvio thread di rendering frame")
+        self.logger.info("Thread di rendering avviato")
 
         # Sequenze ANSI per controllo terminale
         CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
@@ -425,7 +417,8 @@ class VideoPipeline:
 
                     # Controlla se è il marker di fine video
                     if ascii_frames == END_OF_VIDEO_MARKER:
-                        self.logger.info("Ricevuto marker di fine video, terminazione del renderer")
+                        renderer_logger.info("Ricevuto marker di fine video, terminazione del renderer")
+                        self.logger.info("Video terminato, chiusura thread renderer")
                         self.should_stop.set()
                         break
 
@@ -466,10 +459,11 @@ class VideoPipeline:
                 except queue.Empty:
                     # Nessun frame disponibile, aspetta
                     if self.video_finished.is_set() and self.ascii_queue.empty():
-                        self.logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
+                        renderer_logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
                         break
                     time.sleep(0.1)
                 except Exception as e:
+                    renderer_logger.error(f"Errore nel thread di rendering: {e}")
                     self.logger.error(f"Errore nel thread di rendering: {e}")
         finally:
             # Resetta il colore del terminale alla fine
@@ -478,6 +472,7 @@ class VideoPipeline:
 
             # Salva le statistiche FPS per essere usate dal metodo stop()
             self.frame_times = frame_times
+            renderer_logger.info("Thread di rendering frame terminato")
             self.logger.info("Thread di rendering frame terminato")
 
     def start(self):

@@ -143,6 +143,7 @@ def main():
     parser.add_argument("--log_fps", action="store_true", help="Enable logging of display FPS")
     parser.add_argument("--log_performance", action="store_true",
                         help="Enable logging of conversion and rendering performance")
+    parser.add_argument("--verbose", action="store_true", help="Show all log messages in the terminal")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended"], default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
@@ -163,8 +164,12 @@ def main():
         # Imposta la codifica UTF-8 per evitare problemi con caratteri speciali
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        logger = setup_logging(args.log_fps, args.log_performance)
+
+        # Usa il livello INFO per il terminale se verbose è attivo, altrimenti WARNING
+        console_level = logging.INFO if args.verbose else logging.WARNING
+        logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
         logger.info(f"Codifica terminale: {locale.getpreferredencoding()}")
+
     except Exception as e:
         # In caso di errore nella configurazione della codifica, usa una configurazione più semplice
         logger = setup_logging(args.log_fps, args.log_performance)
