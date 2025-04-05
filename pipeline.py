@@ -157,12 +157,10 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             ascii_chars = np.array(list(ascii_palette))
             logger.info(f"Utilizzo palette ASCII personalizzata con {len(ascii_chars)} caratteri")
         else:
-            # Set predefinito di caratteri ASCII
-            ascii_chars = np.array(list("@%#*+=-:. "))
+            # Set predefinito di caratteri ASCII - Sostituiamo lo spazio con caratteri più densi
+            # Nota: invertiamo l'ordine per avere più densità sui pixel luminosi
+            ascii_chars = np.array(list(" .:+*=#%@"))  # Ordine invertito, spazio è il più scuro
             logger.info(f"Utilizzo palette ASCII predefinita con {len(ascii_chars)} caratteri")
-
-        # Cache per le mappature di luminosità
-        luminance_cache = {}
 
         # Lookup table per i codici colore - precalcolata per velocizzare il rendering
         color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
@@ -239,6 +237,62 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
 
             return '\n'.join(rows)
 
+        # Versione alternativa che usa caratteri di blocco Unicode per una migliore densità
+        def convert_frame_to_ascii_color_blocks(frame):
+            """
+            Converte un singolo frame in ASCII art colorata usando blocchi Unicode per una migliore densità.
+            """
+            nonlocal height_scale, last_shape
+
+            # Ridimensiona il frame alla larghezza desiderata
+            height, width_frame, _ = frame.shape
+
+            # Calcola l'altezza proporzionale alla larghezza desiderata
+            # con correzione per l'aspect ratio dei caratteri ASCII
+            if height_scale is None or last_shape != (height, width_frame):
+                height_scale = width / width_frame / char_aspect_correction
+                last_shape = (height, width_frame)
+                logger.info(
+                    f"Frame originale: {width_frame}x{height}, ridimensionato a: {width}x{int(height * height_scale)}")
+
+            new_height = int(height * height_scale)
+            if new_height < 1:
+                new_height = 1
+
+            # Usa INTER_NEAREST per una conversione più veloce rispetto a INTER_LINEAR
+            resized = cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_NEAREST)
+
+            # Estrai i canali di colore in modo più efficiente
+            b = resized[:, :, 0]
+            g = resized[:, :, 1]
+            r = resized[:, :, 2]
+
+            # Precalcola gli indici di colore per migliorare le prestazioni
+            r_idx = np.minimum(5, r // 43).astype(np.int_)  # 255 / 6 ≈ 43
+            g_idx = np.minimum(5, g // 43).astype(np.int_)
+            b_idx = np.minimum(5, b // 43).astype(np.int_)
+
+            # Utilizziamo caratteri di blocco Unicode invece di ASCII standard
+            # '█' (U+2588) è un blocco pieno, più denso visivamente
+            block_char = '█'
+
+            # Crea le stringhe ASCII con codici colore ANSI
+            rows = []
+            for y in range(new_height):
+                row = []
+                for x in range(width):
+                    # Usa la lookup table per il codice colore (più veloce)
+                    color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
+
+                    # Sequenza ANSI per impostare il colore
+                    colored_char = f"\033[38;5;{color_code}m{block_char}"
+                    row.append(colored_char)
+
+                # Resetta il colore alla fine della riga
+                rows.append(''.join(row) + "\033[0m")
+
+            return '\n'.join(rows)
+
         while not should_stop.is_set():
             try:
                 # Ottieni un batch di frame dalla coda
@@ -254,8 +308,8 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Misura il tempo di conversione
                 start_time = time.time()
 
-                # Converti i frame in ASCII colorati
-                ascii_frames = [convert_frame_to_ascii_color(frame) for frame in batch]
+                # Converti i frame in ASCII colorati usando la versione con blocchi Unicode per migliore densità
+                ascii_frames = [convert_frame_to_ascii_color_blocks(frame) for frame in batch]
 
                 conversion_time = time.time() - start_time
                 logger.debug(f"Tempo di conversione batch: {conversion_time:.4f}s")
