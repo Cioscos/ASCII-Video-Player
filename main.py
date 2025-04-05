@@ -141,8 +141,6 @@ def main():
     parser.add_argument("width", type=int, default=100, help="Width of the ASCII output")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second for extraction (default: 10)")
     parser.add_argument("--log_fps", action="store_true", help="Enable logging of display FPS")
-    parser.add_argument("--log_performance", action="store_true",
-                        help="Enable logging of conversion and rendering performance")
     parser.add_argument("--verbose", action="store_true", help="Show all log messages in the terminal")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended"], default="standard",
@@ -248,7 +246,6 @@ def main():
         width,
         args.fps,
         args.batch_size,
-        args.log_performance,
         args.log_fps,
         ascii_palette=ascii_palette,
         loop_video=not args.no_loop  # Utilizziamo il nuovo parametro

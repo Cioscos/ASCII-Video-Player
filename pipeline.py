@@ -360,7 +360,6 @@ class VideoPipeline:
         self.width = width
         self.target_fps = target_fps
         self.batch_size = batch_size
-        self.log_performance = log_performance
         self.log_fps = log_fps
         self.ascii_palette = ascii_palette
         self.loop_video = loop_video
@@ -405,8 +404,8 @@ class VideoPipeline:
         CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
         CLEAR_SCREEN = '\033[2J'  # Pulisce lo schermo
 
-        last_render_time = None
-        frame_times = []
+        last_frame_time = None  # Tempo dell'ultimo frame visualizzato
+        frame_times = []  # Intervalli tra frame consecutivi
         first_frame = True
 
         try:
@@ -427,15 +426,17 @@ class VideoPipeline:
                         if self.should_stop.is_set():
                             break
 
-                        now = time.time()
+                        # Ottieni il tempo corrente prima di eventuali attese
+                        current_time = time.time()
 
                         # Calcola il tempo trascorso dall'ultimo rendering
-                        if last_render_time is not None:
-                            elapsed = now - last_render_time
+                        if last_frame_time is not None:
+                            elapsed = current_time - last_frame_time
                             # Se abbiamo un target FPS, aspetta il tempo necessario
                             if self.target_fps and elapsed < 1.0 / self.target_fps:
-                                time.sleep(1.0 / self.target_fps - elapsed)
-                                now = time.time()
+                                sleep_time = 1.0 / self.target_fps - elapsed
+                                time.sleep(sleep_time)
+                                # Non aggiorniamo current_time qui, per misurare l'intervallo reale
 
                         # Solo la prima volta pulisci completamente lo schermo
                         if first_frame:
@@ -447,14 +448,22 @@ class VideoPipeline:
                         sys.stdout.write(ascii_frame)
                         sys.stdout.flush()
 
-                        render_time = time.time() - now
-                        last_render_time = now
+                        # Tempo dopo aver mostrato il frame
+                        frame_end_time = time.time()
 
-                        # Registra le informazioni sugli FPS
-                        if self.log_fps:
-                            frame_times.append(render_time)
-                            if len(frame_times) > 100:
-                                frame_times.pop(0)
+                        # Se non è il primo frame, calcola l'intervallo completo
+                        if last_frame_time is not None:
+                            # Misura l'intervallo reale tra frame consecutivi (incluso il tempo di attesa)
+                            frame_interval = frame_end_time - last_frame_time
+
+                            # Calcola gli FPS effettivi (1 / intervallo)
+                            if self.log_fps:
+                                frame_times.append(frame_interval)
+                                if len(frame_times) > 100:
+                                    frame_times.pop(0)
+
+                        # Aggiorna il tempo dell'ultimo frame
+                        last_frame_time = frame_end_time
 
                 except queue.Empty:
                     # Nessun frame disponibile, aspetta
@@ -538,3 +547,11 @@ class VideoPipeline:
             max_fps = 1.0 / min_time if min_time > 0 else 0
 
             self.logger.info(f"FPS medio: {avg_fps:.2f}, Min: {min_fps:.2f}, Max: {max_fps:.2f}")
+
+            # Aggiungi un controllo sul target FPS
+            if self.target_fps:
+                self.logger.info(f"Target FPS: {self.target_fps}, FPS effettivo: {avg_fps:.2f}")
+                if avg_fps > self.target_fps * 1.1:  # Se l'FPS è significativamente più alto del target
+                    self.logger.warning(
+                        f"L'FPS effettivo ({avg_fps:.2f}) è molto più alto del target ({self.target_fps}). "
+                        f"Potrebbe esserci un problema con il controllo FPS.")
