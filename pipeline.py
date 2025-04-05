@@ -360,6 +360,7 @@ class VideoPipeline:
         self.width = width
         self.target_fps = target_fps
         self.batch_size = batch_size
+        self.log_performance = log_performance
         self.log_fps = log_fps
         self.ascii_palette = ascii_palette
         self.loop_video = loop_video
@@ -403,10 +404,180 @@ class VideoPipeline:
         # Sequenze ANSI per controllo terminale
         CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
         CLEAR_SCREEN = '\033[2J'  # Pulisce lo schermo
+        BOLD = '\033[1m'  # Testo in grassetto
+        RESET = '\033[0m'  # Reset stile
+        GREEN = '\033[32m'  # Testo verde
+        YELLOW = '\033[33m'  # Testo giallo
+        RED = '\033[31m'  # Testo rosso
+        BLUE = '\033[34m'  # Testo blu
 
         last_frame_time = None  # Tempo dell'ultimo frame visualizzato
         frame_times = []  # Intervalli tra frame consecutivi
+        frame_count = 0  # Contatore per aggiornamenti periodici
+        stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
+        max_graph_points = 50  # Numero massimo di punti nel grafico
         first_frame = True
+
+        # Buffer per il grafico degli ultimi frame times
+        recent_frame_times = []
+
+        # Funzione per creare il grafico ASCII del frame time
+        def create_frame_time_graph(recent_times, width=30, target_fps=None):
+            """
+            Crea un grafico compatto che mostra l'andamento dei tempi di frame.
+
+            Args:
+                recent_times: Lista di tempi di frame in secondi
+                width: Larghezza massima del grafico
+                target_fps: FPS target (se disponibile)
+
+            Returns:
+                Una stringa che rappresenta il grafico ASCII
+            """
+            if not recent_times:
+                return "Nessun dato disponibile per il grafico"
+
+            # Converti i tempi in millisecondi per maggiore leggibilità
+            times_ms = [t * 1000 for t in recent_times]
+
+            # Calcola il target frame time in ms (se target_fps è impostato)
+            target_time_ms = (1000 / target_fps) if target_fps else None
+
+            # Trova i valori min/max per scalare il grafico
+            min_time = min(times_ms)
+            max_time = max(times_ms)
+
+            # Assicura un intervallo minimo per evitare divisioni per zero
+            range_time = max_time - min_time
+            if range_time < 0.5:  # Se la differenza è minima (meno di 0.5ms)
+                mid_value = (max_time + min_time) / 2
+                min_time = mid_value - 0.5
+                max_time = mid_value + 0.5
+
+            # Caratteri per il grafico a blocchi (dal più basso al più alto)
+            # Usamo caratteri di blocchi Unicode per una visualizzazione più compatta
+            block_chars = " ▁▂▃▄▅▆▇█"
+
+            # Crea l'intestazione
+            header = f"{BOLD}Frame Time (ms){RESET}: min={min_time:.1f} max={max_time:.1f} "
+            if target_time_ms:
+                header += f"target={target_time_ms:.1f}"
+
+            # Limita il numero di punti dati alla larghezza specificata
+            if len(times_ms) > width:
+                # Campiona i dati per adattarli alla larghezza disponibile
+                stride = len(times_ms) // width
+                samples = [times_ms[i] for i in range(0, len(times_ms), stride)][:width]
+            else:
+                samples = times_ms[-width:]  # Prendi solo gli ultimi 'width' punti
+
+            # Crea il grafico come una singola linea di blocchi
+            graph_line = ""
+            for time_ms in samples:
+                # Normalizza il valore tra 0 e 1
+                normalized = (time_ms - min_time) / (max_time - min_time)
+                # Converti in indice del carattere del blocco (0-8)
+                block_index = min(int(normalized * (len(block_chars) - 1)), len(block_chars) - 1)
+
+                # Scegli il colore in base al target FPS (se impostato)
+                if target_time_ms is not None:
+                    if time_ms < target_time_ms * 0.85:  # Molto veloce
+                        color = BLUE
+                    elif time_ms < target_time_ms * 1.1:  # Vicino al target
+                        color = GREEN
+                    elif time_ms < target_time_ms * 1.5:  # Leggermente lento
+                        color = YELLOW
+                    else:  # Molto lento
+                        color = RED
+                else:
+                    color = GREEN
+
+                # Aggiungi il blocco colorato
+                graph_line += f"{color}{block_chars[block_index]}{RESET}"
+
+            # Aggiungi una linea di riferimento se il target FPS è specificato
+            if target_time_ms:
+                target_line = ""
+                for time_ms in samples:
+                    if abs(time_ms - target_time_ms) < (max_time - min_time) * 0.1:
+                        target_line += "·"
+                    else:
+                        target_line += " "
+            else:
+                target_line = ""
+
+            # Crea le etichette dell'asse
+            if min_time < 10:
+                min_label = f"{min_time:.1f}ms"
+            else:
+                min_label = f"{min_time:.0f}ms"
+
+            if max_time < 10:
+                max_label = f"{max_time:.1f}ms"
+            else:
+                max_label = f"{max_time:.0f}ms"
+
+            # Calcola gli spazi per allineare le etichette
+            spaces = width - len(min_label) - len(max_label)
+            if spaces < 1:
+                spaces = 1
+
+            # Crea la scala in basso
+            scale = f"{min_label}{' ' * spaces}{max_label}"
+
+            # Unisci tutto in un grafico compatto
+            if target_line:
+                return f"{header}\n{graph_line}\n{target_line}\n{scale}"
+            else:
+                return f"{header}\n{graph_line}\n{scale}"
+
+        # Funzione per creare la stringa di statistiche FPS
+        def create_fps_stats(frame_times, target_fps=None):
+            if not frame_times:
+                return "Calcolando FPS..."
+
+            # Calcola FPS dalle ultime misurazioni
+            recent_times = frame_times[-10:]  # Usa gli ultimi 10 frame per una media recente
+            avg_time = sum(recent_times) / len(recent_times)
+            current_fps = 1.0 / avg_time
+
+            # Calcola deviazione standard per la stabilità
+            if len(recent_times) > 1:
+                variance = sum((t - avg_time) ** 2 for t in recent_times) / len(recent_times)
+                std_dev = variance ** 0.5
+                stability = 1 - min(1, (std_dev / avg_time))  # 0 = instabile, 1 = stabile
+            else:
+                stability = 1
+
+            # Scegli il colore in base al target FPS (se disponibile)
+            if target_fps:
+                fps_ratio = current_fps / target_fps
+                if fps_ratio > 0.95 and fps_ratio < 1.05:  # Entro il 5% del target
+                    fps_color = GREEN
+                elif fps_ratio > 0.8:  # Almeno l'80% del target
+                    fps_color = YELLOW
+                else:
+                    fps_color = RED
+            else:
+                fps_color = GREEN
+
+            # Crea barra di stabilità
+            stability_bar_length = int(stability * 10)
+            stability_bar = f"[{'|' * stability_bar_length}{' ' * (10 - stability_bar_length)}]"
+
+            # Formatta la stringa delle statistiche
+            stats = (
+                f"{BOLD}FPS: {fps_color}{current_fps:.1f}{RESET} "
+                f"| Stabilità: {stability_bar} "
+            )
+
+            if target_fps:
+                stats += f"| Target: {target_fps} FPS "
+                stats += f"| Ratio: {fps_ratio:.2f} "
+
+            stats += f"| Frame {frame_count}"
+
+            return stats
 
         try:
             while not self.should_stop.is_set():
@@ -426,6 +597,9 @@ class VideoPipeline:
                         if self.should_stop.is_set():
                             break
 
+                        # Incrementa il contatore di frame
+                        frame_count += 1
+
                         # Ottieni il tempo corrente prima di eventuali attese
                         current_time = time.time()
 
@@ -436,16 +610,31 @@ class VideoPipeline:
                             if self.target_fps and elapsed < 1.0 / self.target_fps:
                                 sleep_time = 1.0 / self.target_fps - elapsed
                                 time.sleep(sleep_time)
-                                # Non aggiorniamo current_time qui, per misurare l'intervallo reale
 
                         # Solo la prima volta pulisci completamente lo schermo
                         if first_frame:
                             sys.stdout.write(CLEAR_SCREEN)
                             first_frame = False
 
+                        # Prepara la visualizzazione delle statistiche FPS se richiesto
+                        fps_display = ""
+                        if self.log_fps:
+                            # Aggiorna le statistiche solo ogni stats_update_interval frames
+                            if frame_count % stats_update_interval == 0 and frame_times:
+                                # Crea le statistiche FPS
+                                fps_stats = create_fps_stats(frame_times, self.target_fps)
+
+                                # Crea il grafico del frame time
+                                frame_time_graph = create_frame_time_graph(recent_frame_times,
+                                                                           width=50,
+                                                                           target_fps=self.target_fps)
+
+                                # Combina tutto nella visualizzazione
+                                fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
+
                         # Sposta il cursore all'inizio dello schermo e sovrascrivi
                         sys.stdout.write(CURSOR_HOME)
-                        sys.stdout.write(ascii_frame)
+                        sys.stdout.write(ascii_frame + fps_display)
                         sys.stdout.flush()
 
                         # Tempo dopo aver mostrato il frame
@@ -456,11 +645,16 @@ class VideoPipeline:
                             # Misura l'intervallo reale tra frame consecutivi (incluso il tempo di attesa)
                             frame_interval = frame_end_time - last_frame_time
 
-                            # Calcola gli FPS effettivi (1 / intervallo)
+                            # Registra le informazioni sugli FPS
                             if self.log_fps:
                                 frame_times.append(frame_interval)
                                 if len(frame_times) > 100:
                                     frame_times.pop(0)
+
+                                # Aggiorna il buffer per il grafico
+                                recent_frame_times.append(frame_interval)
+                                if len(recent_frame_times) > max_graph_points:
+                                    recent_frame_times.pop(0)
 
                         # Aggiorna il tempo dell'ultimo frame
                         last_frame_time = frame_end_time
