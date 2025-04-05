@@ -1,4 +1,3 @@
-import os
 import time
 import sys
 import logging
@@ -13,7 +12,6 @@ class AsciiRenderer:
         log_fps (bool): Se True, registra le informazioni sugli FPS effettivi
         frame_times (list): Lista di tempi di rendering per il calcolo degli FPS
         last_render_time (float): Timestamp dell'ultimo rendering
-        clear_command (str): Comando per pulire lo schermo del terminale
     """
 
     def __init__(self, target_fps=None, log_fps=False):
@@ -30,11 +28,9 @@ class AsciiRenderer:
         self.frame_times = []
         self.last_render_time = None
 
-        # Determina il metodo di pulizia dello schermo in base al sistema operativo
-        if os.name == 'nt':  # Windows
-            self.clear_command = 'cls'
-        else:  # Unix/Linux/MacOS
-            self.clear_command = 'clear'
+        # Sequenze ANSI per il controllo del terminale
+        self.CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
+        self.CLEAR_SCREEN = '\033[2J'  # Pulisce lo schermo
 
         self.logger = logging.getLogger('AsciiRenderer')
         self.logger.info(f"Inizializzato renderer con target_fps={target_fps}, log_fps={log_fps}")
@@ -59,10 +55,13 @@ class AsciiRenderer:
                 time.sleep(1.0 / self.target_fps - elapsed)
                 now = time.time()
 
-        # Pulisci lo schermo
-        os.system(self.clear_command)
+        # Usa sequenze ANSI per posizionare il cursore e cancellare lo schermo
+        # Prima volta: pulisci l'intero schermo
+        if self.last_render_time is None:
+            sys.stdout.write(self.CLEAR_SCREEN)
 
-        # Stampa il frame usando sys.stdout.write
+        # Sposta il cursore all'inizio e sovrascrivi il contenuto precedente
+        sys.stdout.write(self.CURSOR_HOME)
         sys.stdout.write(ascii_frame)
         sys.stdout.flush()
 

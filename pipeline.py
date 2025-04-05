@@ -13,7 +13,7 @@ File con funzioni standalone per i processi multiprocessing
 """
 
 
-def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size):
+def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size, loop_video=True):
     """
     Funzione standalone per il processo di lettura frame.
 
@@ -23,6 +23,7 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
         should_stop (multiprocessing.Event): Flag per la terminazione
         target_fps (int): FPS target per l'estrazione dei frame
         batch_size (int): Numero di frame da processare in batch
+        loop_video (bool): Se True, riavvia il video quando raggiunge la fine
     """
     # Configura logging locale per questo processo
     logging.basicConfig(
@@ -77,7 +78,15 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                         frame_queue.put(batch, block=True, timeout=1)
                     except queue.Full:
                         pass
-                # Riavvia il video
+
+                # Se loop_video è False, termina
+                if not loop_video:
+                    logger.info("Loop disabilitato, terminazione del processo di lettura")
+                    should_stop.set()
+                    break
+
+                # Altrimenti riavvia il video
+                logger.info("Riavvio del video...")
                 video.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 batch = []
                 continue
@@ -272,10 +281,11 @@ class VideoPipeline:
         batch_size (int): Numero di frame da processare in batch
         log_performance (bool): Se True, registra le informazioni sulle prestazioni
         log_fps (bool): Se True, registra le informazioni sugli FPS
+        loop_video (bool): Se True, riavvia il video quando raggiunge la fine
     """
 
     def __init__(self, video_path, width, target_fps=None, batch_size=1,
-                 log_performance=False, log_fps=False, ascii_palette=None):
+                 log_performance=False, log_fps=False, ascii_palette=None, loop_video=True):
         """
         Inizializza la pipeline video.
 
@@ -288,6 +298,7 @@ class VideoPipeline:
             log_performance (bool): Se True, registra le informazioni sulle prestazioni
             log_fps (bool): Se True, registra le informazioni sugli FPS
             ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
+            loop_video (bool): Se True, riavvia il video quando raggiunge la fine
         """
         self.video_path = video_path
         self.width = width
@@ -296,6 +307,7 @@ class VideoPipeline:
         self.log_performance = log_performance
         self.log_fps = log_fps
         self.ascii_palette = ascii_palette
+        self.loop_video = loop_video
 
         # Coda di comunicazione tra processi
         # Usiamo un maxsize per evitare di sovraccaricare la memoria
@@ -312,7 +324,7 @@ class VideoPipeline:
         # Logger
         self.logger = logging.getLogger('VideoPipeline')
         self.logger.info(
-            f"Inizializzata pipeline con video={video_path}, width={width}, batch_size={batch_size}, fps={target_fps}")
+            f"Inizializzata pipeline con video={video_path}, width={width}, batch_size={batch_size}, fps={target_fps}, loop={loop_video}")
 
         # Attributi per i processi
         self.reader_process = None
@@ -325,14 +337,13 @@ class VideoPipeline:
         """
         self.logger.info("Avvio thread di rendering frame")
 
-        # Determina il metodo di pulizia dello schermo in base al sistema operativo
-        if os.name == 'nt':  # Windows
-            clear_command = 'cls'
-        else:  # Unix/Linux/MacOS
-            clear_command = 'clear'
+        # Sequenze ANSI per controllo terminale
+        CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
+        CLEAR_SCREEN = '\033[2J'  # Pulisce lo schermo
 
         last_render_time = None
         frame_times = []
+        first_frame = True
 
         try:
             while not self.should_stop.is_set():
@@ -355,10 +366,13 @@ class VideoPipeline:
                                 time.sleep(1.0 / self.target_fps - elapsed)
                                 now = time.time()
 
-                        # Pulisci lo schermo
-                        os.system(clear_command)
+                        # Solo la prima volta pulisci completamente lo schermo
+                        if first_frame:
+                            sys.stdout.write(CLEAR_SCREEN)
+                            first_frame = False
 
-                        # Stampa il frame usando sys.stdout.write invece di print
+                        # Sposta il cursore all'inizio dello schermo e sovrascrivi
+                        sys.stdout.write(CURSOR_HOME)
                         sys.stdout.write(ascii_frame)
                         sys.stdout.flush()
 
@@ -394,7 +408,7 @@ class VideoPipeline:
         # Avvia il processo di lettura frame
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
-            args=(self.video_path, self.frame_queue, self.should_stop, self.target_fps, self.batch_size),
+            args=(self.video_path, self.frame_queue, self.should_stop, self.target_fps, self.batch_size, self.loop_video),
             daemon=True
         )
         self.reader_process.start()

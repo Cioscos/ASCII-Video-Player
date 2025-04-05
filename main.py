@@ -146,6 +146,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended"], default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
+    # Nuovo parametro per controllare il loop del video
+    parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
 
     args = parser.parse_args()
 
@@ -243,7 +245,8 @@ def main():
         args.batch_size,
         args.log_performance,
         args.log_fps,
-        ascii_palette=ascii_palette
+        ascii_palette=ascii_palette,
+        loop_video=not args.no_loop  # Utilizziamo il nuovo parametro
     )
 
     # Gestione dei segnali per una chiusura pulita
@@ -262,9 +265,13 @@ def main():
         # Mostra istruzioni all'utente
         print("\nASCII Video Player avviato!")
         print("Premi Ctrl+C per terminare\n")
+        if not args.no_loop:
+            print("Il video si ripeterà automaticamente alla fine")
+        else:
+            print("Il video terminerà automaticamente alla fine")
 
-        # Attendi che l'utente interrompa l'esecuzione
-        while True:
+        # Attendi che l'utente interrompa l'esecuzione o che il video finisca
+        while not pipeline.should_stop.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Interruzione da tastiera")
