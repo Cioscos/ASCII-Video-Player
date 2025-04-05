@@ -1,113 +1,91 @@
-"""
-Funzioni ottimizzate per convertire frame video in ASCII art colorata.
-"""
-import cv2
 import numpy as np
+import cv2
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+import logging
 
-# Pre-calcola la palette ASCII
-ASCII_CHARS = "@%#*+=-:. "
-ASCII_CHARS_LEN = len(ASCII_CHARS)
-ASCII_INDICES = np.arange(0, 256)  # Mappatura da luminosità (0-255) a indice ASCII
 
-def resize_frame(frame, width):
+class FrameConverter:
     """
-    Ridimensiona un frame mantenendo l'aspect ratio.
+    Classe che gestisce la conversione dei frame video in caratteri ASCII.
+    Utilizza il parallelismo e ottimizzazioni numpy per massimizzare le prestazioni.
 
-    Parametri:
-        frame (numpy.ndarray): Frame da ridimensionare.
-        width (int): Larghezza desiderata in caratteri.
-
-    Ritorna:
-        numpy.ndarray: Frame ridimensionato.
-        int: Altezza calcolata basata sull'aspect ratio.
+    Attributes:
+        width (int): Larghezza desiderata dell'output ASCII
+        max_workers (int): Numero di worker per l'elaborazione parallela
+        ascii_chars (numpy.ndarray): Array di caratteri ASCII ordinati per intensità
+        height_scale (float): Fattore di scala per l'altezza del frame
+        last_shape (tuple): Forma dell'ultimo frame processato
     """
-    height, original_width, _ = frame.shape
-    aspect_ratio = height / original_width
-    # Il terminale ha un rapporto altezza/larghezza carattere di circa 2:1,
-    # quindi moltiplichiamo per 0.5 per ottenere un aspect ratio corretto
-    new_height = int(width * aspect_ratio * 0.5)
 
-    # Usa INTER_AREA per downscaling (più veloce e migliore per ridurre dimensioni)
-    return cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_AREA), new_height
+    def __init__(self, width, max_workers=None):
+        """
+        Inizializza il convertitore di frame.
 
+        Args:
+            width (int): Larghezza desiderata dell'output ASCII
+            max_workers (int, optional): Numero massimo di worker per l'elaborazione parallela.
+                                        Se None, viene determinato automaticamente.
+        """
+        self.width = width
+        # Usa tutti i core disponibili se non specificato diversamente
+        self.max_workers = max_workers or max(1, multiprocessing.cpu_count() - 1)
+        # Caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
+        self.ascii_chars = np.array(list('@%#*+=-:. '))
 
-def frame_to_ascii(frame, width, color_cache=None):
-    """
-    Converte un frame in una rappresentazione ASCII colorata con cache dei colori.
-    """
-    # Inizializza la cache se non esiste
-    if color_cache is None:
-        color_cache = {}
+        # Prealloca le matrici per le operazioni di resize
+        self.height_scale = None
+        self.last_shape = None
 
-    # Ridimensiona il frame
-    resized_frame, height = resize_frame(frame, width)
+        self.logger = logging.getLogger('FrameConverter')
+        self.logger.info(f"Inizializzato convertitore con width={width}, workers={self.max_workers}")
 
-    # Pre-allocazione di memoria per le stringhe di output
-    rows = []
-    last_color = None
+    def _convert_frame_to_ascii(self, frame):
+        """
+        Converte un singolo frame in ASCII art usando ottimizzazioni numpy.
 
-    # Calcola la luminosità per l'intero frame in una volta sola
-    luminosity = np.dot(resized_frame[..., :3], [0.0722, 0.7152, 0.2126])
+        Args:
+            frame (numpy.ndarray): Il frame da convertire
 
-    # Mappa la luminosità agli indici della palette ASCII
-    ascii_indices = (luminosity / 255 * (ASCII_CHARS_LEN - 1)).astype(int)
+        Returns:
+            str: Rappresentazione ASCII del frame
+        """
+        # Ridimensiona il frame alla larghezza desiderata
+        height, width, _ = frame.shape
 
-    # Costruisci ciascuna riga in modo ottimizzato
-    for y in range(height):
-        row_chars = []
-        for x in range(width):
-            # Ottieni i valori BGR per il pixel corrente
-            b, g, r = resized_frame[y, x]
+        # Calcola l'altezza proporzionale alla larghezza desiderata
+        if self.height_scale is None or self.last_shape != (height, width):
+            self.height_scale = self.width / width
+            self.last_shape = (height, width)
 
-            # Quantizza i colori (riduci la profondità di colore)
-            r = (r // 5) * 5
-            g = (g // 5) * 5
-            b = (b // 5) * 5
+        new_height = int(height * self.height_scale)
+        resized = cv2.resize(frame, (self.width, new_height))
 
-            # Ottieni il carattere ASCII corrispondente alla luminosità
-            char_idx = ascii_indices[y, x]
-            char = ASCII_CHARS[char_idx]
+        # Converti a scala di grigi
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
 
-            # Ottimizzazione: cambia il colore solo se diverso dall'ultimo usato
-            color = (r, g, b)
-            if color != last_color:
-                # Usa la cache per le sequenze di colore
-                if color not in color_cache:
-                    color_cache[color] = f"\033[38;2;{r};{g};{b}m"
+        # Normalizza i valori di grigio su tutta la gamma di caratteri ASCII
+        # e mappali al rispettivo indice nell'array ascii_chars
+        indices = (gray / 255 * (len(self.ascii_chars) - 1)).astype(np.int)
 
-                row_chars.append(color_cache[color] + char)
-                last_color = color
-            else:
-                row_chars.append(char)
+        # Usa numpy per creare velocemente l'output
+        chars = self.ascii_chars[indices]
 
-        # Unisci tutti i caratteri della riga in una sola stringa
-        rows.append("".join(row_chars))
+        # Aggiungi i caratteri di newline
+        rows = [''.join(row) for row in chars]
+        ascii_frame = '\n'.join(rows)
 
-    # Unisci tutte le righe con newline e reset del colore alla fine di ogni riga
-    return "\n".join(r + "\033[0m" for r in rows), height
+        return ascii_frame
 
-def batch_process_frames(frames_batch, width):
-    """
-    Processa un batch di frame convertendoli in ASCII.
+    def convert_batch(self, frames):
+        """
+        Converte un batch di frame in ASCII art in parallelo.
 
-    Parametri:
-        frames_batch (list): Lista di frame da convertire.
-        width (int): Larghezza desiderata in caratteri.
+        Args:
+            frames (list): Lista di frame da convertire
 
-    Ritorna:
-        list: Lista di frame ASCII elaborati.
-    """
-    # Pre-allocazione dell'array di output
-    ascii_frames = []
-
-    # Controllo di sicurezza per evitare operazioni inutili
-    if not frames_batch:
-        return ascii_frames
-
-    # Ottimizzazione: elabora i frame in batch
-    for frame in frames_batch:
-        if frame is not None:
-            ascii_frame, _ = frame_to_ascii(frame, width)
-            ascii_frames.append(ascii_frame)
-
-    return ascii_frames
+        Returns:
+            list: Lista di frame convertiti in ASCII
+        """
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            return list(executor.map(self._convert_frame_to_ascii, frames))

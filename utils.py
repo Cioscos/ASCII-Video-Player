@@ -1,70 +1,62 @@
-"""
-Funzioni di utilità per l'applicazione ASCII Video.
-"""
-import os
-import shutil
 import logging
-import time
+import os
+import sys
+from datetime import datetime
 
-# Configurazione del logger
-def setup_logging():
+
+def setup_logging(log_fps=False, log_performance=False):
     """
     Configura il sistema di logging.
 
-    Configura un logger che scrive su file e su console con timestamp e livello.
+    Args:
+        log_fps (bool): Se True, abilita il logging degli FPS
+        log_performance (bool): Se True, abilita il logging delle prestazioni
 
-    Ritorna:
-        logging.Logger: Logger configurato.
+    Returns:
+        logging.Logger: L'oggetto logger configurato
     """
-    # Crea una directory per i log se non esiste
-    log_dir = os.path.join(os.getcwd(), 'logs')
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+    # Crea la directory dei log se non esiste
+    os.makedirs('logs', exist_ok=True)
 
-    # Nome file log con timestamp
-    log_filename = os.path.join(log_dir, f"ascii_video_{time.strftime('%Y%m%d_%H%M%S')}.log")
+    # Genera un nome file univoco basato sulla data e ora corrente
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = f'logs/ascii_video_{timestamp}.log'
 
-    # Configurazione logger
-    logger = logging.getLogger('ascii_video')
-    logger.setLevel(logging.DEBUG)
+    # Configura il logger root
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
 
-    # Handler per il file
+    # Handler per il file di log
     file_handler = logging.FileHandler(log_filename)
-    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
-
-    # Aggiungi gli handler al logger
     logger.addHandler(file_handler)
 
-    logger.info(f"Log inizializzato in: {log_filename}")
+    # Handler per la console
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # Configura il livello di logging in base ai parametri
+    if log_fps or log_performance:
+        logger.setLevel(logging.DEBUG)
+
+    logger.info(f"Logging configurato. File di log: {log_filename}")
 
     return logger
 
+
 def get_terminal_size():
     """
-    Ottiene le dimensioni attuali del terminale.
+    Ottiene le dimensioni del terminale.
 
-    Ritorna:
-        tuple: (colonne, righe) del terminale.
+    Returns:
+        tuple: (width, height) del terminale
     """
-    return shutil.get_terminal_size()
-
-
-def estimate_height(width, video_aspect_ratio=None):
-    """
-    Stima l'altezza basata sulla larghezza e sull'aspect ratio del video.
-
-    Parametri:
-        width (int): Larghezza in caratteri.
-        video_aspect_ratio (float, optional): Aspect ratio del video (altezza/larghezza).
-                                            Se None, usa un valore predefinito di 9/16.
-
-    Ritorna:
-        int: Altezza stimata in caratteri.
-    """
-    # Se non è fornito un aspect ratio, assumiamo 16:9 (comune per video)
-    if video_aspect_ratio is None:
-        video_aspect_ratio = 9 / 16
-
-    # Consideriamo che i caratteri del terminale sono circa il doppio in altezza rispetto alla larghezza
-    return int(width * video_aspect_ratio * 2)
+    try:
+        columns, lines = os.get_terminal_size()
+        return columns, lines
+    except:
+        # Valori di default in caso di errore
+        return 80, 24

@@ -1,22 +1,29 @@
 """
-Funzioni per la gestione del terminale e la visualizzazione di frame ASCII.
+Funzioni ottimizzate per la gestione del terminale e la visualizzazione di frame ASCII.
 """
 import sys
+import time
 
 # CONSTANTS
 HIDE_CURSOR = "\033[?25l"
 CLEAR_SCREEN = "\033[2J\033[H"
 SHOW_CURSOR = "\033[?25h"
+RESET_TERMINAL = "\033c"  # Reset completo del terminale
+MOVE_TO_HOME = "\033[H"   # Sposta il cursore in alto a sinistra
+
+# Cache per l'ultimo frame visualizzato
+last_frame_cache = None
+last_frame_time = 0
 
 def generate_calibration_frame(width, height):
     """
     Genera un frame ASCII di calibrazione tutto bianco, con un bordo e una croce centrale.
 
-    Parametri:
+    Args:
         width (int): Larghezza dell'output ASCII.
         height (int): Altezza dell'output ASCII.
 
-    Ritorna:
+    Returns:
         str: Stringa ASCII con il frame bianco, bordi e croce centrale.
     """
     # Caratteri
@@ -25,43 +32,46 @@ def generate_calibration_frame(width, height):
     WHITE_CHAR = "█"  # Blocchi pieni per simulare un frame bianco
 
     # Crea una matrice di caratteri bianchi
-    ascii_frame = [[WHITE_CHAR] * width for _ in range(height)]
+    # Ottimizzazione: pre-allocazione delle stringhe di riga
+    rows = [BORDER_CHAR * width]
 
-    # Disegna i bordi del rettangolo
-    for x in range(width):
-        ascii_frame[0][x] = BORDER_CHAR  # Riga superiore
-        ascii_frame[-1][x] = BORDER_CHAR  # Riga inferiore
+    # Riga superiore (bordo)
 
-    for y in range(height):
-        ascii_frame[y][0] = BORDER_CHAR  # Colonna sinistra
-        ascii_frame[y][-1] = BORDER_CHAR  # Colonna destra
+    # Righe intermedie
+    for y in range(1, height-1):
+        if y == height // 2:
+            # Riga centrale con croce
+            row = BORDER_CHAR + CROSS_CHAR * (width-2) + BORDER_CHAR
+        else:
+            # Riga normale con bordi
+            row = BORDER_CHAR + WHITE_CHAR * (width-2) + BORDER_CHAR
+        rows.append(row)
 
-    # Disegna la croce centrale
-    center_y, center_x = height // 2, width // 2
-    for x in range(width):
-        ascii_frame[center_y][x] = CROSS_CHAR  # Linea orizzontale
-    for y in range(height):
-        ascii_frame[y][center_x] = CROSS_CHAR  # Linea verticale
+    # Riga inferiore (bordo)
+    if height > 1:
+        rows.append(BORDER_CHAR * width)
 
-    # Converti la matrice in una stringa
-    ascii_string = "\n".join("".join(row) for row in ascii_frame)
-    return ascii_string
+    # Sovrascrivere la croce verticale
+    center_x = width // 2
+    for y in range(1, height-1):
+        if y != height // 2:  # Salta la riga centrale (già con croce)
+            row_list = list(rows[y])
+            row_list[center_x] = CROSS_CHAR
+            rows[y] = "".join(row_list)
 
+    return "\n".join(rows)
 
 def render_calibration_frame(width, height):
     """
     Mostra un frame di calibrazione nel terminale e attende che l'utente prema ENTER.
     Dopo l'input, il terminale viene svuotato e il buffer di scorrimento viene rimosso.
 
-    Parametri:
+    Args:
         width (int): Larghezza dell'output ASCII.
         height (int): Altezza dell'output ASCII.
     """
     # Genera il frame di calibrazione
     calibration_frame = generate_calibration_frame(width, height)
-
-    # Escape sequences per il terminale
-    RESET_TERMINAL = "\033c"  # Reset completo del terminale
 
     # Pulisce lo schermo e nasconde il cursore
     sys.stdout.write(HIDE_CURSOR)
@@ -71,16 +81,22 @@ def render_calibration_frame(width, height):
     sys.stdout.flush()
 
     # Attendi l'input dell'utente
-    input()
+    try:
+        input()
+    except KeyboardInterrupt:
+        # Gestisci CTRL+C durante la calibrazione
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.write("\n\nCalibrazione interrotta.\n")
+        sys.stdout.flush()
+        sys.exit(1)
 
     # Resetta completamente il terminale (rimuove lo scrollback buffer)
     sys.stdout.write(RESET_TERMINAL)
     sys.stdout.flush()
 
-    # Ripristina il cursore
+    # Ripristina il cursore (sarà poi nascosto di nuovo all'avvio della pipeline)
     sys.stdout.write(SHOW_CURSOR)
     sys.stdout.flush()
-
 
 def clear_terminal():
     """
@@ -92,7 +108,6 @@ def clear_terminal():
     sys.stdout.write(CLEAR_SCREEN)
     sys.stdout.flush()
 
-
 def hide_cursor():
     """
     Nasconde il cursore del terminale.
@@ -101,7 +116,6 @@ def hide_cursor():
     """
     sys.stdout.write(HIDE_CURSOR)
     sys.stdout.flush()
-
 
 def show_cursor():
     """
@@ -112,23 +126,39 @@ def show_cursor():
     sys.stdout.write(SHOW_CURSOR)
     sys.stdout.flush()
 
-
 def print_frame(frame_str):
     """
-    Stampa un frame ASCII nel terminale, aggiornando solo le parti modificate
-    con un algoritmo ottimizzato per sequenze di caratteri.
+    Stampa un frame ASCII nel terminale, con throttling intelligente per alte performance.
 
-    Parametri:
+    Args:
         frame_str (str): Stringa ASCII da visualizzare.
-        previous_frame (str): Frame precedente per confronto.
 
-    Ritorna:
+    Returns:
         str: Il frame corrente per uso futuro.
     """
-    sys.stdout.write("\033[H")
+    global last_frame_cache, last_frame_time
+
+    current_time = time.time()
+
+    # Throttling intelligente - limita il frame rate se stiamo inviando
+    # troppi frame al terminale (può causare flickering o rallentamenti)
+    min_frame_interval = 1.0 / 60.0  # Max 60 FPS al terminale
+
+    if current_time - last_frame_time < min_frame_interval:
+        # Troppe chiamate ravvicinate, salta questo frame per mantenere performance
+        return frame_str
+
+    # Aggiorna il timestamp dell'ultimo frame
+    last_frame_time = current_time
+
+    # Ottimizzazione: muovi il cursore in alto a sinistra invece di pulire lo schermo
+    sys.stdout.write(MOVE_TO_HOME)
 
     # Scrive l'intero frame in un'unica operazione
     sys.stdout.write(frame_str)
     sys.stdout.flush()
+
+    # Aggiorna la cache per il prossimo confronto
+    last_frame_cache = frame_str
 
     return frame_str
