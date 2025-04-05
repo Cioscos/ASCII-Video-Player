@@ -12,6 +12,9 @@ import multiprocessing
 File con funzioni standalone per i processi multiprocessing
 """
 
+# Definiamo un segnale di terminazione come oggetto univoco che useremo come marker
+END_OF_VIDEO_MARKER = "END_OF_VIDEO"
+
 
 def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size, loop_video=True):
     """
@@ -79,10 +82,15 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                     except queue.Full:
                         pass
 
-                # Se loop_video è False, termina
+                # Se loop_video è False, invia il marker di fine video e termina
                 if not loop_video:
+                    logger.info("Invio marker di fine video")
+                    try:
+                        # Invia un marker speciale per indicare la fine del video
+                        frame_queue.put(END_OF_VIDEO_MARKER, block=True, timeout=1)
+                    except queue.Full:
+                        pass
                     logger.info("Loop disabilitato, terminazione del processo di lettura")
-                    should_stop.set()
                     break
 
                 # Altrimenti riavvia il video
@@ -236,6 +244,13 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Ottieni un batch di frame dalla coda
                 batch = frame_queue.get(block=True, timeout=1)
 
+                # Controlla se è il marker di fine video
+                if batch == END_OF_VIDEO_MARKER:
+                    logger.info("Ricevuto marker di fine video")
+                    # Passa il marker al renderer
+                    ascii_queue.put(END_OF_VIDEO_MARKER, block=True, timeout=1)
+                    break
+
                 # Misura il tempo di conversione
                 start_time = time.time()
 
@@ -309,6 +324,9 @@ class VideoPipeline:
         self.ascii_palette = ascii_palette
         self.loop_video = loop_video
 
+        # Flag per indicare che il video è finito
+        self.video_finished = multiprocessing.Event()
+
         # Coda di comunicazione tra processi
         # Usiamo un maxsize per evitare di sovraccaricare la memoria
         queue_size = max(10, batch_size * 3)
@@ -351,6 +369,12 @@ class VideoPipeline:
                     # Ottieni un batch di frame ASCII dalla coda
                     ascii_frames = self.ascii_queue.get(block=True, timeout=1)
 
+                    # Controlla se è il marker di fine video
+                    if ascii_frames == END_OF_VIDEO_MARKER:
+                        self.logger.info("Ricevuto marker di fine video, terminazione del renderer")
+                        self.should_stop.set()
+                        break
+
                     # Renderizza ciascun frame
                     for ascii_frame in ascii_frames:
                         if self.should_stop.is_set():
@@ -387,6 +411,9 @@ class VideoPipeline:
 
                 except queue.Empty:
                     # Nessun frame disponibile, aspetta
+                    if self.video_finished.is_set() and self.ascii_queue.empty():
+                        self.logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
+                        break
                     time.sleep(0.1)
                 except Exception as e:
                     self.logger.error(f"Errore nel thread di rendering: {e}")
@@ -408,7 +435,8 @@ class VideoPipeline:
         # Avvia il processo di lettura frame
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
-            args=(self.video_path, self.frame_queue, self.should_stop, self.target_fps, self.batch_size, self.loop_video),
+            args=(
+            self.video_path, self.frame_queue, self.should_stop, self.target_fps, self.batch_size, self.loop_video),
             daemon=True
         )
         self.reader_process.start()
