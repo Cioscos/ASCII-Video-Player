@@ -424,7 +424,8 @@ class VideoPipeline:
         # Funzione per creare il grafico ASCII del frame time
         def create_frame_time_graph(recent_times, width=30, target_fps=None):
             """
-            Crea un grafico compatto che mostra l'andamento dei tempi di frame.
+            Crea un grafico compatto che mostra l'andamento dei tempi di frame,
+            con gestione intelligente degli outlier.
 
             Args:
                 recent_times: Lista di tempi di frame in secondi
@@ -434,8 +435,8 @@ class VideoPipeline:
             Returns:
                 Una stringa che rappresenta il grafico ASCII
             """
-            if not recent_times:
-                return "Nessun dato disponibile per il grafico"
+            if not recent_times or len(recent_times) < 2:
+                return "Raccolta dati per il grafico..."
 
             # Converti i tempi in millisecondi per maggiore leggibilità
             times_ms = [t * 1000 for t in recent_times]
@@ -443,9 +444,31 @@ class VideoPipeline:
             # Calcola il target frame time in ms (se target_fps è impostato)
             target_time_ms = (1000 / target_fps) if target_fps else None
 
-            # Trova i valori min/max per scalare il grafico
-            min_time = min(times_ms)
-            max_time = max(times_ms)
+            # Trova i valori min/max originali
+            original_min = min(times_ms)
+            original_max = max(times_ms)
+
+            # Rilevamento outlier (valori anomali)
+            # Calcoliamo la mediana e la deviazione mediana assoluta (MAD)
+            times_sorted = sorted(times_ms)
+            median = times_sorted[len(times_sorted) // 2]
+            mad = sum(abs(x - median) for x in times_ms) / len(times_ms)
+
+            # Definiamo un outlier come un valore che si discosta dalla mediana più di 3.5 volte la MAD
+            threshold = 3.5 * mad
+            outliers = [t for t in times_ms if abs(t - median) > threshold]
+            has_outliers = len(outliers) > 0
+
+            # Se abbiamo outlier, filtriamoli per la visualizzazione del grafico principale
+            filtered_times = times_ms
+            if has_outliers:
+                filtered_times = [t for t in times_ms if abs(t - median) <= threshold]
+                if not filtered_times:  # Se abbiamo filtrato tutto, manteniamo almeno alcuni valori
+                    filtered_times = times_sorted[:int(len(times_ms) * 0.8)]  # Prendiamo l'80% dei valori più bassi
+
+            # Calcola min/max per il grafico filtrato
+            min_time = min(filtered_times)
+            max_time = max(filtered_times)
 
             # Assicura un intervallo minimo per evitare divisioni per zero
             range_time = max_time - min_time
@@ -455,13 +478,18 @@ class VideoPipeline:
                 max_time = mid_value + 0.5
 
             # Caratteri per il grafico a blocchi (dal più basso al più alto)
-            # Usamo caratteri di blocchi Unicode per una visualizzazione più compatta
             block_chars = " ▁▂▃▄▅▆▇█"
 
             # Crea l'intestazione
-            header = f"{BOLD}Frame Time (ms){RESET}: min={min_time:.1f} max={max_time:.1f} "
-            if target_time_ms:
-                header += f"target={target_time_ms:.1f}"
+            if has_outliers:
+                header = f"{BOLD}Frame Time (ms){RESET}: min={original_min:.1f} max={original_max:.1f}"
+                if target_time_ms:
+                    header += f" target={target_time_ms:.1f}"
+                header += f" {RED}[outliers rilevati]{RESET}"
+            else:
+                header = f"{BOLD}Frame Time (ms){RESET}: min={min_time:.1f} max={max_time:.1f}"
+                if target_time_ms:
+                    header += f" target={target_time_ms:.1f}"
 
             # Limita il numero di punti dati alla larghezza specificata
             if len(times_ms) > width:
@@ -474,37 +502,33 @@ class VideoPipeline:
             # Crea il grafico come una singola linea di blocchi
             graph_line = ""
             for time_ms in samples:
-                # Normalizza il valore tra 0 e 1
-                normalized = (time_ms - min_time) / (max_time - min_time)
-                # Converti in indice del carattere del blocco (0-8)
-                block_index = min(int(normalized * (len(block_chars) - 1)), len(block_chars) - 1)
+                # Verifica se questo punto è un outlier
+                is_outlier = abs(time_ms - median) > threshold
 
-                # Scegli il colore in base al target FPS (se impostato)
-                if target_time_ms is not None:
-                    if time_ms < target_time_ms * 0.85:  # Molto veloce
-                        color = BLUE
-                    elif time_ms < target_time_ms * 1.1:  # Vicino al target
-                        color = GREEN
-                    elif time_ms < target_time_ms * 1.5:  # Leggermente lento
-                        color = YELLOW
-                    else:  # Molto lento
-                        color = RED
+                if is_outlier:
+                    # Gli outlier vengono sempre mostrati come blocchi pieni rossi
+                    graph_line += f"{RED}█{RESET}"
                 else:
-                    color = GREEN
+                    # Normalizza il valore tra 0 e 1 (rispetto ai valori filtrati)
+                    normalized = max(0, min(1, (time_ms - min_time) / (max_time - min_time)))
+                    # Converti in indice del carattere del blocco (0-8)
+                    block_index = min(int(normalized * (len(block_chars) - 1)), len(block_chars) - 1)
 
-                # Aggiungi il blocco colorato
-                graph_line += f"{color}{block_chars[block_index]}{RESET}"
-
-            # Aggiungi una linea di riferimento se il target FPS è specificato
-            if target_time_ms:
-                target_line = ""
-                for time_ms in samples:
-                    if abs(time_ms - target_time_ms) < (max_time - min_time) * 0.1:
-                        target_line += "·"
+                    # Scegli il colore in base al target FPS (se impostato)
+                    if target_time_ms is not None:
+                        if time_ms < target_time_ms * 0.85:  # Molto veloce
+                            color = BLUE
+                        elif time_ms < target_time_ms * 1.1:  # Vicino al target
+                            color = GREEN
+                        elif time_ms < target_time_ms * 1.5:  # Leggermente lento
+                            color = YELLOW
+                        else:  # Molto lento
+                            color = RED
                     else:
-                        target_line += " "
-            else:
-                target_line = ""
+                        color = GREEN
+
+                    # Aggiungi il blocco colorato
+                    graph_line += f"{color}{block_chars[block_index]}{RESET}"
 
             # Crea le etichette dell'asse
             if min_time < 10:
@@ -525,11 +549,12 @@ class VideoPipeline:
             # Crea la scala in basso
             scale = f"{min_label}{' ' * spaces}{max_label}"
 
+            # Se abbiamo outlier, aggiungi una riga extra con il valore massimo
+            if has_outliers and original_max > max_time:
+                scale += f" [{RED}max: {original_max:.1f}ms{RESET}]"
+
             # Unisci tutto in un grafico compatto
-            if target_line:
-                return f"{header}\n{graph_line}\n{target_line}\n{scale}"
-            else:
-                return f"{header}\n{graph_line}\n{scale}"
+            return f"{header}\n{graph_line}\n{scale}"
 
         # Funzione per creare la stringa di statistiche FPS
         def create_fps_stats(frame_times, target_fps=None):
