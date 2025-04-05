@@ -131,7 +131,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
     logger = logging.getLogger("Converter")
 
     try:
-        logger.info("Avvio processo di conversione frame")
+        logger.info(f"Avvio processo di conversione frame con larghezza={width}")
 
         # Caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
         ascii_chars = np.array(list('@%#*+=-:. '))
@@ -155,6 +155,8 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop):
             if height_scale is None or last_shape != (height, width_frame):
                 height_scale = width / width_frame / char_aspect_correction
                 last_shape = (height, width_frame)
+                logger.info(
+                    f"Frame originale: {width_frame}x{height}, ridimensionato a: {width}x{int(height * height_scale)}")
 
             new_height = int(height * height_scale)
             if new_height < 1:

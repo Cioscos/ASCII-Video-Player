@@ -81,6 +81,9 @@ def render_calibration_frame(width, height):
     # Log delle dimensioni effettive del frame di calibrazione
     logging.info(f"Generazione frame di calibrazione: {width}x{height}")
 
+    # Ottieni dimensioni terminale
+    term_width, term_height = get_terminal_size()
+
     # Genera il frame di calibrazione
     calibration_frame = generate_calibration_frame(width, height)
 
@@ -95,7 +98,11 @@ def render_calibration_frame(width, height):
     sys.stdout.write(CLEAR_SCREEN)
     sys.stdout.write(calibration_frame + "\n")
     sys.stdout.write("\n[INFO] Dimensioni frame: " + str(width) + "x" + str(height))
-    sys.stdout.write("\n[INFO] Regola la dimensione del terminale e premi ENTER per iniziare...\n")
+    sys.stdout.write("\n[INFO] Dimensioni terminale attuale: " + str(term_width) + "x" + str(term_height))
+    sys.stdout.write(
+        "\n\n[CALIBRAZIONE] Regola la dimensione dei caratteri del terminale finche' il frame entra completamente")
+    sys.stdout.write("\n[CALIBRAZIONE] Dovresti vedere un rettangolo completo con una croce al centro")
+    sys.stdout.write("\n[CALIBRAZIONE] Premi ENTER quando il frame e' visualizzato correttamente")
     sys.stdout.flush()
 
     # Attendi l'input dell'utente
@@ -145,8 +152,19 @@ def main():
         print(f"Errore: Il file video '{args.video_path}' non esiste.")
         return 1
 
-    # Configurazione del logging
-    logger = setup_logging(args.log_fps, args.log_performance)
+    # Configura il sistema di logging
+    try:
+        import io
+        import locale
+        # Imposta la codifica UTF-8 per evitare problemi con caratteri speciali
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        logger = setup_logging(args.log_fps, args.log_performance)
+        logger.info(f"Codifica terminale: {locale.getpreferredencoding()}")
+    except Exception as e:
+        # In caso di errore nella configurazione della codifica, usa una configurazione più semplice
+        logger = setup_logging(args.log_fps, args.log_performance)
+        logger.warning(f"Impossibile configurare la codifica UTF-8: {e}")
 
     # Apertura video per ottenere le dimensioni iniziali
     cap = cv2.VideoCapture(args.video_path)
@@ -167,14 +185,22 @@ def main():
         logger.error("Errore: impossibile leggere il primo frame.")
         return 1
 
+    height, width_frame = frame.shape[:2]
+    aspect_ratio = height / width_frame
+
     # Ottieni le dimensioni del terminale
     term_width, term_height = get_terminal_size()
     logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
 
     # Calcola la larghezza dell'output ASCII
-    # Se l'utente ha specificato una larghezza maggiore di quella del terminale,
-    # utilizza quella del terminale
-    width = min(args.width, term_width)
+    # Usa il valore specificato dall'utente senza limitazioni
+    term_width, term_height = get_terminal_size()
+    logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
+
+    # Usiamo il valore specificato dall'utente senza avvisi
+    # Il frame di calibrazione serve proprio per regolare la dimensione dei caratteri
+    width = args.width
+    logger.info(f"Utilizzando larghezza ASCII specificata: {width}")
 
     # Calcola l'altezza proporzionale mantenendo le proporzioni originali del video
     # I caratteri ASCII non sono quadrati, ma più alti che larghi.
@@ -183,9 +209,6 @@ def main():
     aspect_ratio = height / width_frame
     char_aspect_correction = 2.25  # Fattore di correzione per i caratteri ASCII
     new_height = int(aspect_ratio * width / char_aspect_correction)
-
-    # Assicurati che l'altezza non superi lo schermo
-    new_height = min(new_height, term_height - 5)  # 5 righe di margine
 
     logger.info(
         f"Dimensioni output ASCII: {width}x{new_height} (aspect ratio video: {aspect_ratio:.2f}, corretta: {aspect_ratio / char_aspect_correction:.2f})")

@@ -27,7 +27,7 @@ def setup_logging(log_fps=False, log_performance=False):
     logger.setLevel(logging.INFO)
 
     # Handler per il file di log
-    file_handler = logging.FileHandler(log_filename)
+    file_handler = logging.FileHandler(log_filename, encoding='utf-8')
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
