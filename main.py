@@ -232,7 +232,7 @@ def main():
     palette_map = {
         "basic": "@%#*+=-:. ",
         "standard": "@%#*+=-:. WM#oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[] ",
-        "extended": "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+        "extended": "@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~i!lI;:,\"^`'. "
     }
     ascii_palette = palette_map[args.palette]
     logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
