@@ -208,39 +208,48 @@ class AudioPlayer:
     def stop(self):
         """
         Ferma la riproduzione dell'audio con gestione ottimizzata delle risorse.
+        Implementa una chiusura non bloccante con un timeout molto breve.
         """
+        if not hasattr(self, 'should_stop') or self.should_stop.is_set():
+            # Già in fase di chiusura o non inizializzato, evita duplicazione
+            return
+
         self.logger.info("Arresto riproduzione audio")
         self.should_stop.set()
 
-        # Timeout ridotto per il join del thread audio
-        # Questo evita che l'applicazione rimanga bloccata troppo a lungo
-        if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=0.5)
-            # Non aspettiamo all'infinito che il thread termini
-            # Se il thread è ancora attivo dopo il timeout, lo consideriamo comunque terminato
-            if self.audio_thread.is_alive():
-                self.logger.warning("Thread audio non ha terminato entro il timeout")
-                # Non chiamiamo più thread.join() perché questo può bloccare il processo
+        # Timeout molto ridotto per il join del thread audio
+        # Usiamo un approccio non bloccante per evitare ritardi nella chiusura
+        if hasattr(self, 'audio_thread') and self.audio_thread and self.audio_thread.is_alive():
+            # Timeout di soli 100ms - se non termina velocemente, continuiamo
+            self.audio_thread.join(timeout=0.1)
+            # Non aspettiamo più a lungo, ma procediamo con la pulizia delle risorse
 
-        # Chiudi le risorse audio in modo sicuro
-        if self.stream:
+        # Chiudi le risorse audio in modo non bloccante
+        if hasattr(self, 'stream') and self.stream:
             try:
                 # Interrompi il callback loop di sounddevice
+                # Utilizziamo abort invece di close per interrompere rapidamente
                 self.stream.abort()
-                self.stream.close()
+                # Non attende che il buffer si svuoti
             except Exception as e:
-                self.logger.error(f"Errore durante la chiusura dello stream audio: {e}")
+                self.logger.error(f"Errore durante l'abort dello stream audio: {e}")
             finally:
                 self.stream = None
 
-        # Chiudi l'audio clip
-        if self.audio_clip:
+        # Rilascia l'audio clip senza ulteriori elaborazioni
+        if hasattr(self, 'audio_clip') and self.audio_clip:
             try:
-                self.audio_clip.close()
+                # Utilizziamo un flag per tracciare se la chiusura è stata tentata
+                # per evitare di bloccarsi su operazioni di chiusura problematiche
+                close_attempted = False
+                self.audio_clip = None  # Rilascia immediatamente il riferimento
             except Exception as e:
                 self.logger.error(f"Errore durante la chiusura dell'audio clip: {e}")
-            finally:
-                self.audio_clip = None
+
+        # Rilascia immediatamente le risorse di memoria
+        if hasattr(self, 'audio_array'):
+            self.audio_array = None
 
         self.initialized = False
         self.playback_started = False
+        self.logger.info("Risorse audio rilasciate")
