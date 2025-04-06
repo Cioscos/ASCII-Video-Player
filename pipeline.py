@@ -420,17 +420,27 @@ class VideoPipeline:
         """
         Thread che renderizza i frame ASCII sul terminale.
         Gestisce la visualizzazione del video, statistiche FPS e sincronizzazione audio.
+        Implementa delta rendering e buffering ottimizzato dell'output.
         """
         # Usa un logger locale invece di sovrascrivere self.logger
         from utils import configure_process_logging
+        from terminal_output_buffer import TerminalOutputBuffer
+        import sys
+        import time
+        import queue
+
         renderer_logger = configure_process_logging("Renderer", console_level=logging.WARNING)
 
         renderer_logger.info("Avvio thread di rendering frame")
         self.logger.info("Thread di rendering avviato")
 
+        # Crea un buffer di output per ridurre le chiamate a sys.stdout.write
+        output_buffer = TerminalOutputBuffer(sys.stdout)
+
         # Sequenze ANSI per controllo terminale
         CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
         CLEAR_SCREEN = '\033[2J'  # Pulisce lo schermo
+        CURSOR_POSITION = '\033[%d;%dH'  # Posizionamento del cursore (riga, colonna)
         BOLD = '\033[1m'  # Testo in grassetto
         RESET = '\033[0m'  # Reset stile
         GREEN = '\033[32m'  # Testo verde
@@ -445,6 +455,10 @@ class VideoPipeline:
         max_graph_points = 50  # Numero massimo di punti nel grafico
         first_frame = True
         video_start_time = time.time()  # Tempo di inizio riproduzione
+
+        # Buffer per il rendering incrementale
+        previous_frame = None
+        previous_fps_display = ""
 
         # Buffer per il grafico degli ultimi frame times
         recent_frame_times = []
@@ -632,6 +646,42 @@ class VideoPipeline:
 
             return stats
 
+        # Funzione per il delta rendering - confronta il frame corrente con il precedente
+        def delta_render(current_frame, prev_frame):
+            """
+            Implementa il delta rendering confrontando il frame corrente con quello precedente
+            e aggiornando solo le parti cambiate.
+
+            Args:
+                current_frame (str): Frame ASCII corrente
+                prev_frame (str): Frame ASCII precedente
+
+            Returns:
+                None: Scrive direttamente nel buffer di output
+            """
+            if prev_frame is None or first_frame:
+                # Se è il primo frame o non c'è un frame precedente, renderizza tutto
+                output_buffer.write(CURSOR_HOME)
+                output_buffer.write(current_frame)
+                return
+
+            # Dividi i frame in righe
+            current_lines = current_frame.split('\n')
+            prev_lines = prev_frame.split('\n')
+
+            # Assicura che entrambi i frame abbiano lo stesso numero di righe
+            max_lines = max(len(current_lines), len(prev_lines))
+            current_lines += [''] * (max_lines - len(current_lines))
+            prev_lines += [''] * (max_lines - len(prev_lines))
+
+            # Per ogni riga, controlla se è cambiata
+            for i, (curr_line, prev_line) in enumerate(zip(current_lines, prev_lines)):
+                if curr_line != prev_line:
+                    # Calcola i blocchi di differenza all'interno della riga
+                    # Per semplificare, aggiorniamo l'intera riga quando è diversa
+                    output_buffer.write(CURSOR_POSITION % (i + 1, 1))  # +1 perché ANSI inizia da 1, non da 0
+                    output_buffer.write(curr_line)
+
         try:
             while not self.should_stop.is_set():
                 try:
@@ -668,7 +718,7 @@ class VideoPipeline:
 
                         # Solo la prima volta pulisci completamente lo schermo
                         if first_frame:
-                            sys.stdout.write(CLEAR_SCREEN)
+                            output_buffer.write(CLEAR_SCREEN)
                             first_frame = False
 
                         # Aggiorna la sincronizzazione audio-video se abilitata
@@ -698,10 +748,15 @@ class VideoPipeline:
                                 # Combina tutto nella visualizzazione
                                 fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
 
-                        # Sposta il cursore all'inizio dello schermo e sovrascrivi
-                        sys.stdout.write(CURSOR_HOME)
-                        sys.stdout.write(ascii_frame + fps_display)
-                        sys.stdout.flush()
+                        # Applica il delta rendering per aggiornare solo le parti cambiate dello schermo
+                        current_display = ascii_frame + fps_display
+                        delta_render(current_display, previous_frame)
+
+                        # Flush del buffer per inviare i dati al terminale
+                        output_buffer.flush()
+
+                        # Aggiorna il frame precedente per il prossimo confronto
+                        previous_frame = current_display
 
                         # Tempo dopo aver mostrato il frame
                         frame_end_time = time.time()
@@ -736,8 +791,8 @@ class VideoPipeline:
                     self.logger.error(f"Errore nel thread di rendering: {e}")
         finally:
             # Resetta il colore del terminale alla fine
-            sys.stdout.write("\033[0m\n")
-            sys.stdout.flush()
+            output_buffer.write("\033[0m\n")
+            output_buffer.flush()
 
             # Salva le statistiche FPS per essere usate dal metodo stop()
             self.frame_times = frame_times
