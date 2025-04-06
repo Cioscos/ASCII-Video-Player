@@ -147,8 +147,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended"], default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
-    # Nuovo parametro per controllare il loop del video
+    # Parametro per controllare il loop del video
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
+    # Parametro per l'audio
+    parser.add_argument("--audio", action="store_true", help="Enable audio playback")
 
     args = parser.parse_args()
 
@@ -156,6 +158,18 @@ def main():
     if not os.path.isfile(args.video_path):
         print(f"Errore: Il file video '{args.video_path}' non esiste.")
         return 1
+
+    # Verifica delle dipendenze per l'audio
+    if args.audio:
+        try:
+            import sounddevice
+            from moviepy import AudioFileClip
+            print("Dipendenze audio verificate con successo.")
+        except ImportError as e:
+            print(f"Errore: impossibile abilitare l'audio. Mancano le dipendenze necessarie: {e}")
+            print("Per abilitare l'audio, installa: pip install sounddevice moviepy")
+            print("Continuo senza audio...")
+            args.audio = False
 
     # Configura il sistema di logging
     try:
@@ -168,11 +182,12 @@ def main():
         # Usa il livello INFO per il terminale se verbose è attivo, altrimenti WARNING
         console_level = logging.INFO if args.verbose else logging.WARNING
         logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
-        logger.info(f"Codifica terminale: {locale.getpreferredencoding()}")
 
+        logger.info(f"Codifica terminale: {locale.getpreferredencoding()}")
     except Exception as e:
         # In caso di errore nella configurazione della codifica, usa una configurazione più semplice
-        logger = setup_logging(args.log_fps, args.log_performance)
+        console_level = logging.INFO if args.verbose else logging.WARNING
+        logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
         logger.warning(f"Impossibile configurare la codifica UTF-8: {e}")
 
     # Apertura video per ottenere le dimensioni iniziali
@@ -194,15 +209,17 @@ def main():
         logger.error("Errore: impossibile leggere il primo frame.")
         return 1
 
+    # Se l'audio è abilitato, consiglia un target FPS appropriato
+    if args.audio and args.fps is None:
+        target_fps = min(30, fps_originale)  # Limita a max 30 FPS per non sovraccaricare
+        logger.info(
+            f"Audio abilitato senza FPS target specificati. Usando {target_fps} FPS per una migliore sincronizzazione.")
+        args.fps = target_fps
+
     height, width_frame = frame.shape[:2]
     aspect_ratio = height / width_frame
 
     # Ottieni le dimensioni del terminale
-    term_width, term_height = get_terminal_size()
-    logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
-
-    # Calcola la larghezza dell'output ASCII
-    # Usa il valore specificato dall'utente senza limitazioni
     term_width, term_height = get_terminal_size()
     logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
 
@@ -237,7 +254,7 @@ def main():
     palette_map = {
         "basic": "@%#*+=-:. ",
         "standard": "@%#*+=-:. WM#oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[] ",
-        "extended": "@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~i!lI;:,\"^`'. "
+        "extended": "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
     }
     ascii_palette = palette_map[args.palette]
     logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
@@ -251,7 +268,8 @@ def main():
         args.log_performance,
         args.log_fps,
         ascii_palette=ascii_palette,
-        loop_video=not args.no_loop  # Utilizziamo il nuovo parametro
+        loop_video=not args.no_loop,
+        enable_audio=args.audio  # Passa il parametro per l'audio
     )
 
     # Gestione dei segnali per una chiusura pulita
@@ -274,6 +292,9 @@ def main():
             print("Il video si ripeterà automaticamente alla fine")
         else:
             print("Il video terminerà automaticamente alla fine")
+
+        if args.audio:
+            print("Audio abilitato")
 
         # Attendi che l'utente interrompa l'esecuzione o che il video finisca
         while not pipeline.should_stop.is_set():

@@ -341,7 +341,8 @@ class VideoPipeline:
     """
 
     def __init__(self, video_path, width, target_fps=None, batch_size=1,
-                 log_performance=False, log_fps=False, ascii_palette=None, loop_video=True):
+                 log_performance=False, log_fps=False, ascii_palette=None, loop_video=True,
+                 enable_audio=False):
         """
         Inizializza la pipeline video.
 
@@ -355,6 +356,7 @@ class VideoPipeline:
             log_fps (bool): Se True, registra le informazioni sugli FPS
             ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
             loop_video (bool): Se True, riavvia il video quando raggiunge la fine
+            enable_audio (bool): Se True, riproduce l'audio del video
         """
         self.video_path = video_path
         self.width = width
@@ -364,6 +366,7 @@ class VideoPipeline:
         self.log_fps = log_fps
         self.ascii_palette = ascii_palette
         self.loop_video = loop_video
+        self.enable_audio = enable_audio
 
         # Flag per indicare che il video è finito
         self.video_finished = multiprocessing.Event()
@@ -383,16 +386,34 @@ class VideoPipeline:
         # Logger
         self.logger = logging.getLogger('VideoPipeline')
         self.logger.info(
-            f"Inizializzata pipeline con video={video_path}, width={width}, batch_size={batch_size}, fps={target_fps}, loop={loop_video}")
+            f"Inizializzata pipeline con video={video_path}, width={width}, batch_size={batch_size}, "
+            f"fps={target_fps}, loop={loop_video}, audio={enable_audio}")
 
         # Attributi per i processi
         self.reader_process = None
         self.converter_process = None
         self.renderer_thread = None
 
+        # Attributi per l'audio
+        self.audio_player = None
+        self.video_duration = None
+        self.current_frame = 0
+        self.total_frames = 0
+
+        # Se l'audio è abilitato, inizializza il player audio
+        if self.enable_audio:
+            try:
+                from audio_player import AudioPlayer
+                self.audio_player = AudioPlayer(video_path, target_fps)
+                self.logger.info("Player audio inizializzato")
+            except ImportError as e:
+                self.logger.error(f"Impossibile inizializzare l'audio: {e}")
+                self.enable_audio = False
+
     def _frame_renderer_thread(self):
         """
         Thread che renderizza i frame ASCII sul terminale.
+        Gestisce la visualizzazione del video, statistiche FPS e sincronizzazione audio.
         """
         # Usa un logger locale invece di sovrascrivere self.logger
         from utils import configure_process_logging
@@ -417,6 +438,7 @@ class VideoPipeline:
         stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
         max_graph_points = 50  # Numero massimo di punti nel grafico
         first_frame = True
+        video_start_time = time.time()  # Tempo di inizio riproduzione
 
         # Buffer per il grafico degli ultimi frame times
         recent_frame_times = []
@@ -624,6 +646,8 @@ class VideoPipeline:
 
                         # Incrementa il contatore di frame
                         frame_count += 1
+                        if hasattr(self, 'current_frame'):
+                            self.current_frame = frame_count  # Aggiornamento per il player audio
 
                         # Ottieni il tempo corrente prima di eventuali attese
                         current_time = time.time()
@@ -640,6 +664,17 @@ class VideoPipeline:
                         if first_frame:
                             sys.stdout.write(CLEAR_SCREEN)
                             first_frame = False
+
+                        # Aggiorna la sincronizzazione audio-video se abilitata
+                        if hasattr(self, 'enable_audio') and self.enable_audio and \
+                                hasattr(self, 'video_duration') and self.video_duration and \
+                                hasattr(self, 'total_frames') and self.total_frames:
+                            # Calcola il tempo di riproduzione attuale basato sul conteggio dei frame
+                            video_time = (self.current_frame / self.total_frames) * self.video_duration
+
+                            # Aggiorna il tempo nel player audio per la sincronizzazione
+                            if hasattr(self, 'audio_player') and self.audio_player:
+                                self.audio_player.update_video_time(video_time)
 
                         # Prepara la visualizzazione delle statistiche FPS se richiesto
                         fps_display = ""
@@ -686,7 +721,7 @@ class VideoPipeline:
 
                 except queue.Empty:
                     # Nessun frame disponibile, aspetta
-                    if self.video_finished.is_set() and self.ascii_queue.empty():
+                    if hasattr(self, 'video_finished') and self.video_finished.is_set() and self.ascii_queue.empty():
                         renderer_logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
                         break
                     time.sleep(0.1)
@@ -708,6 +743,35 @@ class VideoPipeline:
         Avvia la pipeline video.
         """
         self.logger.info("Avvio pipeline video")
+
+        # Se l'audio è abilitato, ottieni informazioni sul video
+        if self.enable_audio:
+            try:
+                import cv2
+                from moviepy import VideoFileClip
+
+                # Ottieni la durata del video
+                video_clip = VideoFileClip(self.video_path)
+                self.video_duration = video_clip.duration
+                video_clip.close()
+
+                # Ottieni il numero totale di frame
+                cap = cv2.VideoCapture(self.video_path)
+                self.total_frames = int(cap.get(cv2.CAP_PROP_FPS) * self.video_duration)
+                cap.release()
+
+                self.logger.info(f"Informazioni video: durata={self.video_duration}s, frames={self.total_frames}")
+
+                # Inizializza e avvia il player audio
+                if self.audio_player.initialize():
+                    self.audio_player.start()
+                    self.logger.info("Riproduzione audio avviata")
+                else:
+                    self.logger.warning("Inizializzazione audio fallita, continuo senza audio")
+                    self.enable_audio = False
+            except Exception as e:
+                self.logger.error(f"Errore nell'avvio dell'audio: {e}")
+                self.enable_audio = False
 
         # Avvia il processo di lettura frame
         self.reader_process = multiprocessing.Process(
@@ -739,6 +803,11 @@ class VideoPipeline:
         """
         self.logger.info("Arresto pipeline video")
         self.should_stop.set()
+
+        # Ferma la riproduzione audio se attiva
+        if self.enable_audio and self.audio_player:
+            self.audio_player.stop()
+            self.logger.info("Riproduzione audio terminata")
 
         # Attendi la terminazione dei processi
         if hasattr(self, 'reader_process') and self.reader_process and self.reader_process.is_alive():
