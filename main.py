@@ -74,6 +74,12 @@ def main():
         logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
 
         logger.info(f"Codifica terminale: {locale.getpreferredencoding()}")
+
+        # Controlla se il terminale supporta UTF-8
+        if 'utf-8' not in locale.getpreferredencoding().lower():
+            logger.warning(
+                "Terminale non supporta UTF-8. Alcuni caratteri potrebbero non essere visualizzati correttamente.")
+
     except Exception as e:
         # In caso di errore nella configurazione della codifica, usa una configurazione più semplice
         console_level = logging.INFO if args.verbose else logging.WARNING
