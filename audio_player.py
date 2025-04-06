@@ -207,21 +207,40 @@ class AudioPlayer:
 
     def stop(self):
         """
-        Ferma la riproduzione dell'audio.
+        Ferma la riproduzione dell'audio con gestione ottimizzata delle risorse.
         """
         self.logger.info("Arresto riproduzione audio")
         self.should_stop.set()
 
-        # Attendi la terminazione del thread audio
+        # Timeout ridotto per il join del thread audio
+        # Questo evita che l'applicazione rimanga bloccata troppo a lungo
         if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=1)
+            self.audio_thread.join(timeout=0.5)
+            # Non aspettiamo all'infinito che il thread termini
+            # Se il thread è ancora attivo dopo il timeout, lo consideriamo comunque terminato
+            if self.audio_thread.is_alive():
+                self.logger.warning("Thread audio non ha terminato entro il timeout")
+                # Non chiamiamo più thread.join() perché questo può bloccare il processo
 
-        # Chiudi le risorse
+        # Chiudi le risorse audio in modo sicuro
+        if self.stream:
+            try:
+                # Interrompi il callback loop di sounddevice
+                self.stream.abort()
+                self.stream.close()
+            except Exception as e:
+                self.logger.error(f"Errore durante la chiusura dello stream audio: {e}")
+            finally:
+                self.stream = None
+
+        # Chiudi l'audio clip
         if self.audio_clip:
             try:
                 self.audio_clip.close()
-            except:
-                pass
+            except Exception as e:
+                self.logger.error(f"Errore durante la chiusura dell'audio clip: {e}")
+            finally:
+                self.audio_clip = None
 
         self.initialized = False
         self.playback_started = False
