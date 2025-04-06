@@ -860,47 +860,107 @@ class VideoPipeline:
 
     def stop(self):
         """
-        Ferma la pipeline video.
+        Ferma la pipeline video con un approccio ottimizzato.
+        Implementa una strategia di terminazione più efficiente e non bloccante.
         """
         self.logger.info("Arresto pipeline video")
+
+        # Imposta il flag di termine
         self.should_stop.set()
 
-        # Ferma la riproduzione audio se attiva
-        if self.enable_audio and self.audio_player:
-            self.audio_player.stop()
-            self.logger.info("Riproduzione audio terminata")
+        # Usa un tempo di timeout più breve per evitare blocchi lunghi
+        timeout = 0.5
 
-        # Attendi la terminazione dei processi
+        # Prima ferma l'audio (se presente) poiché è quello che
+        # più probabilmente può bloccare l'arresto
+        if self.enable_audio and hasattr(self, 'audio_player') and self.audio_player:
+            try:
+                self.audio_player.stop()
+                self.logger.info("Riproduzione audio terminata")
+            except Exception as e:
+                # Cattura eventuali eccezioni ma non blocca la chiusura
+                self.logger.error(f"Errore durante l'arresto dell'audio: {e}")
+
+        # Svuota le code per evitare blocchi
+        try:
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get(block=False)
+                except:
+                    break
+        except:
+            pass
+
+        try:
+            while not self.ascii_queue.empty():
+                try:
+                    self.ascii_queue.get(block=False)
+                except:
+                    break
+        except:
+            pass
+
+        # Gestisci lo stop dei processi in parallelo piuttosto che sequenzialmente
+        # per evitare di attendere troppo tempo se uno si blocca
+
+        # Prima imposta timeout e join per tutti
+        processes_to_terminate = []
+
         if hasattr(self, 'reader_process') and self.reader_process and self.reader_process.is_alive():
-            self.reader_process.join(timeout=2)
+            self.reader_process.join(timeout=timeout)
             if self.reader_process.is_alive():
-                self.reader_process.terminate()
+                processes_to_terminate.append(self.reader_process)
 
         if hasattr(self, 'converter_process') and self.converter_process and self.converter_process.is_alive():
-            self.converter_process.join(timeout=2)
+            self.converter_process.join(timeout=timeout)
             if self.converter_process.is_alive():
-                self.converter_process.terminate()
+                processes_to_terminate.append(self.converter_process)
 
-        # Attendi la terminazione del thread
+        # Poi termina quelli che non si sono fermati
+        for process in processes_to_terminate:
+            try:
+                process.terminate()
+                # Non aspettiamo ulteriormente dopo terminate()
+            except Exception as e:
+                self.logger.error(f"Errore durante la terminazione del processo: {e}")
+
+        # Gestisci il thread di rendering - deve essere fermato per ultimo perché
+        # è nel processo principale
         if hasattr(self, 'renderer_thread') and self.renderer_thread and self.renderer_thread.is_alive():
-            self.renderer_thread.join(timeout=2)
+            self.renderer_thread.join(timeout=timeout)
+            # Non possiamo terminare un thread, quindi se è ancora vivo dopo il timeout
+            # dobbiamo semplicemente abbandonarlo
 
-        # Stampa le statistiche FPS
-        if self.log_fps and self.frame_times:
-            avg_time = sum(self.frame_times) / len(self.frame_times)
-            min_time = min(self.frame_times)
-            max_time = max(self.frame_times)
+        # Ottimizzazione: stampa le statistiche FPS solo se richiesto e ci sono dati
+        if self.log_fps and hasattr(self, 'frame_times') and self.frame_times:
+            # Calcola statistiche solo sui frame recenti per una maggiore precisione
+            recent_frames = self.frame_times[-min(len(self.frame_times), 100):]
 
-            avg_fps = 1.0 / avg_time if avg_time > 0 else 0
-            min_fps = 1.0 / max_time if max_time > 0 else 0
-            max_fps = 1.0 / min_time if min_time > 0 else 0
+            if recent_frames:
+                avg_time = sum(recent_frames) / len(recent_frames)
+                min_time = min(recent_frames)
+                max_time = max(recent_frames)
 
-            self.logger.info(f"FPS medio: {avg_fps:.2f}, Min: {min_fps:.2f}, Max: {max_fps:.2f}")
+                avg_fps = 1.0 / avg_time if avg_time > 0 else 0
+                min_fps = 1.0 / max_time if max_time > 0 else 0
+                max_fps = 1.0 / min_time if min_time > 0 else 0
 
-            # Aggiungi un controllo sul target FPS
-            if self.target_fps:
-                self.logger.info(f"Target FPS: {self.target_fps}, FPS effettivo: {avg_fps:.2f}")
-                if avg_fps > self.target_fps * 1.1:  # Se l'FPS è significativamente più alto del target
-                    self.logger.warning(
-                        f"L'FPS effettivo ({avg_fps:.2f}) è molto più alto del target ({self.target_fps}). "
-                        f"Potrebbe esserci un problema con il controllo FPS.")
+                self.logger.info(f"FPS medio: {avg_fps:.2f}, Min: {min_fps:.2f}, Max: {max_fps:.2f}")
+
+                # Aggiungi informazioni sul target FPS
+                if self.target_fps:
+                    self.logger.info(f"Target FPS: {self.target_fps}, FPS effettivo: {avg_fps:.2f}")
+                    if avg_fps > self.target_fps * 1.1:
+                        self.logger.warning(
+                            f"L'FPS effettivo ({avg_fps:.2f}) è molto più alto del target ({self.target_fps}). "
+                            f"Potrebbe esserci un problema con il controllo FPS.")
+
+        # Assicurati che il cursore sia visibile nel terminale
+        from terminal_output_buffer import TerminalOutputBuffer
+        import sys
+
+        output_buffer = TerminalOutputBuffer(sys.stdout)
+        output_buffer.write('\033[?25h')  # Mostra il cursore
+        output_buffer.flush()
+
+        self.logger.info("Pipeline video terminata")
