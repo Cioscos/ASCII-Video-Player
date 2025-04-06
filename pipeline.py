@@ -135,14 +135,19 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
     from utils import configure_process_logging
     logger = configure_process_logging("Converter", console_level=logging.WARNING)
 
+    box_palette = False
+
     try:
         logger.info(f"Avvio processo di conversione frame con larghezza={width}")
 
         # Caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
         # Se fornita una palette personalizzata, usala
         if ascii_palette:
-            ascii_chars = np.array(list(ascii_palette))
-            logger.info(f"Utilizzo palette ASCII personalizzata con {len(ascii_chars)} caratteri")
+            if ascii_palette == 'box':
+                box_palette = True
+            else:
+                ascii_chars = np.array(list(ascii_palette))
+                logger.info(f"Utilizzo palette ASCII personalizzata con {len(ascii_chars)} caratteri")
         else:
             # Set predefinito di caratteri ASCII - Sostituiamo lo spazio con caratteri più densi
             # Nota: invertiamo l'ordine per avere più densità sui pixel luminosi
@@ -296,7 +301,8 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 start_time = time.time()
 
                 # Converti i frame in ASCII colorati usando la versione con blocchi Unicode per migliore densità
-                ascii_frames = [convert_frame_to_ascii_color_blocks(frame) for frame in batch]
+                convert_function = convert_frame_to_ascii_color_blocks if box_palette else convert_frame_to_ascii_color
+                ascii_frames = [convert_function(frame) for frame in batch]
 
                 conversion_time = time.time() - start_time
                 logger.debug(f"Tempo di conversione batch: {conversion_time:.4f}s")

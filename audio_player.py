@@ -1,4 +1,3 @@
-import numpy as np
 import sounddevice as sd
 from moviepy import *
 import time

@@ -6,8 +6,6 @@ import time
 import os
 import cv2
 
-from converter import FrameConverter
-from renderer import AsciiRenderer
 from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
 
@@ -145,7 +143,7 @@ def main():
                         help="Enable logging of conversion and rendering performance")
     parser.add_argument("--verbose", action="store_true", help="Show all log messages in the terminal")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
-    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended"], default="standard",
+    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box"], default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
     # Parametro per controllare il loop del video
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
@@ -251,13 +249,18 @@ def main():
     sys.stdout.flush()
 
     # Ottieni la palette di caratteri ASCII in base alla scelta dell'utente
-    palette_map = {
-        "basic": "@%#*+=-:. ",
-        "standard": "@%#*+=-:. WM#oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[] ",
-        "extended": "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
-    }
-    ascii_palette = palette_map[args.palette]
-    logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
+    if args.palette != 'box':
+        palette_map = {
+            "basic": " .:-=+*#%@",
+            "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
+            "extended": " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+        }
+        ascii_palette = palette_map[args.palette]
+        logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
+    else:
+        logger.info(f"Utilizzando metodo palette box")
+        ascii_palette = 'box'
+
 
     # Inizializza la pipeline
     pipeline = VideoPipeline(
