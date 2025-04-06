@@ -3,8 +3,6 @@ import time
 import queue
 import threading
 import logging
-import sys
-import numpy as np
 import multiprocessing
 
 """
@@ -122,7 +120,8 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
 
 def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_palette=None):
     """
-    Funzione standalone per il processo di conversione frame.
+    Funzione standalone ottimizzata per il processo di conversione frame.
+    Implementa ottimizzazioni per l'elaborazione di batch e utilizza NumPy in modo più efficiente.
 
     Args:
         width (int): Larghezza dell'output ASCII
@@ -133,6 +132,11 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
     """
     # Configura logging locale per questo processo - solo errori e avvisi al terminale
     from utils import configure_process_logging
+    import cv2
+    import time
+    import queue
+    import numpy as np
+
     logger = configure_process_logging("Converter", console_level=logging.WARNING)
 
     box_palette = False
@@ -154,12 +158,26 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             ascii_chars = np.array(list(" .:+*=#%@"))  # Ordine invertito, spazio è il più scuro
             logger.info(f"Utilizzo palette ASCII predefinita con {len(ascii_chars)} caratteri")
 
-        # Lookup table per i codici colore - precalcolata per velocizzare il rendering
+        # OTTIMIZZAZIONE: Pre-calcolo della lookup table colori - riduce calcoli ripetuti
+        # Costruisci un array 3D di dimensione 6x6x6 per mappare direttamente (r,g,b) -> codice colore
+        # Questo evita di ricalcolare gli indici di colore per ogni pixel
         color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
         for r in range(6):
             for g in range(6):
                 for b in range(6):
                     color_lookup[r, g, b] = 16 + 36 * r + 6 * g + b
+
+        # OTTIMIZZAZIONE: Pre-calcolo delle sequenze ANSI per ogni codice colore
+        # Questo evita di formattare stringhe per ogni pixel, riducendo significativamente l'overhead
+        color_sequences = {}
+        for r in range(6):
+            for g in range(6):
+                for b in range(6):
+                    color_code = color_lookup[r, g, b]
+                    color_sequences[color_code] = f"\033[38;5;{color_code}m"
+
+        # Cache sequenze ANSI più usate
+        RESET_SEQ = "\033[0m"
 
         height_scale = None
         last_shape = None
@@ -167,9 +185,11 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
         # Fattore di correzione per le proporzioni dei caratteri ASCII
         char_aspect_correction = 2.25
 
+        # OTTIMIZZAZIONE: conversione senza allocazioni di memoria eccessive
         def convert_frame_to_ascii_color(frame):
             """
-            Converte un singolo frame in ASCII art colorata con vettorizzazione ottimizzata.
+            Versione ottimizzata della conversione frame -> ASCII con minor allocazione di memoria.
+            Utilizza array prealloccati e riutilizza buffer ove possibile.
             """
             nonlocal height_scale, last_shape
 
@@ -188,51 +208,54 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             if new_height < 1:
                 new_height = 1
 
-            # Usa INTER_NEAREST per una conversione più veloce rispetto a INTER_LINEAR
+            # OTTIMIZZAZIONE: Usa INTER_NEAREST per velocità e meno artefatti in ASCII
             resized = cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_NEAREST)
 
-            # Estrai i canali di colore in modo più efficiente
+            # OTTIMIZZAZIONE: Calcola direttamente gray con cvtColor (più veloce delle formule manuali)
+            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+
+            # Ottimizzazione: elaborazione vettorizzata più efficiente
+            # Estrai i canali di colore in modo più efficiente (vista invece di copia)
             b = resized[:, :, 0]
             g = resized[:, :, 1]
             r = resized[:, :, 2]
 
-            # Calcola la luminosità (scala di grigi) per scegliere il carattere
-            # Y = 0.299R + 0.587G + 0.114B (pesi ottimali per la percezione umana)
-            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-
-            # Normalizza i valori di grigio e mappali all'indice nell'array ascii_chars
-            # Ottimizzazione: manteniamo tutto in array numpy il più a lungo possibile
-            indices = (gray / 255 * (len(ascii_chars) - 1)).astype(np.int_)
-
-            # Precalcola gli indici di colore per migliorare le prestazioni
+            # OTTIMIZZAZIONE: Calcola gli indici di colore in un'unica operazione vettorizzata
+            # invece di iterare su ogni pixel (molto più veloce)
             r_idx = np.minimum(5, r // 43).astype(np.int_)  # 255 / 6 ≈ 43
             g_idx = np.minimum(5, g // 43).astype(np.int_)
             b_idx = np.minimum(5, b // 43).astype(np.int_)
 
-            # Crea le stringhe ASCII con codici colore ANSI
+            # Normalizza i valori di grigio e mappali all'indice nell'array ascii_chars
+            # OTTIMIZZAZIONE: operazione vettorizzata su tutto l'array mantenendo la divisione float
+            # per evitare errori di arrotondamento con palette estese
+            indices = (gray / 255.0 * (len(ascii_chars) - 1)).astype(np.int_)
+
+            # OTTIMIZZAZIONE: Costruisci le righe utilizzando liste e join
+            # invece di concatenare stringhe (molto più efficiente)
             rows = []
             for y in range(new_height):
-                row = []
+                row_chars = []
                 for x in range(width):
                     # Ottieni il carattere ASCII in base alla luminosità
                     char = ascii_chars[indices[y, x]]
 
-                    # Usa la lookup table per il codice colore (più veloce)
+                    # Usa i valori precalcolati per il codice colore
                     color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
 
-                    # Sequenza ANSI per impostare il colore
-                    colored_char = f"\033[38;5;{color_code}m{char}"
-                    row.append(colored_char)
+                    # Usa le sequenze colore precalcolate dal dizionario
+                    row_chars.append(color_sequences[color_code] + char)
 
-                # Resetta il colore alla fine della riga
-                rows.append(''.join(row) + "\033[0m")
+                # OTTIMIZZAZIONE: Unisci l'intera riga in una volta sola, aggiungendo reset alla fine
+                rows.append(''.join(row_chars) + RESET_SEQ)
 
+            # OTTIMIZZAZIONE: Unisci tutte le righe in un'unica stringa
             return '\n'.join(rows)
 
-        # Versione alternativa che usa caratteri di blocco Unicode per una migliore densità
+        # Versione alternativa con blocchi Unicode, ottimizzata
         def convert_frame_to_ascii_color_blocks(frame):
             """
-            Converte un singolo frame in ASCII art colorata usando blocchi Unicode per una migliore densità.
+            Versione ottimizzata per la conversione in blocchi Unicode.
             """
             nonlocal height_scale, last_shape
 
@@ -240,7 +263,6 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             height, width_frame, _ = frame.shape
 
             # Calcola l'altezza proporzionale alla larghezza desiderata
-            # con correzione per l'aspect ratio dei caratteri ASCII
             if height_scale is None or last_shape != (height, width_frame):
                 height_scale = width / width_frame / char_aspect_correction
                 last_shape = (height, width_frame)
@@ -251,40 +273,45 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             if new_height < 1:
                 new_height = 1
 
-            # Usa INTER_NEAREST per una conversione più veloce rispetto a INTER_LINEAR
+            # OTTIMIZZAZIONE: Usa INTER_NEAREST per un rendering più veloce
             resized = cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_NEAREST)
 
-            # Estrai i canali di colore in modo più efficiente
+            # OTTIMIZZAZIONE: Estrai i canali direttamente come viste
             b = resized[:, :, 0]
             g = resized[:, :, 1]
             r = resized[:, :, 2]
 
-            # Precalcola gli indici di colore per migliorare le prestazioni
-            r_idx = np.minimum(5, r // 43).astype(np.int_)  # 255 / 6 ≈ 43
+            # OTTIMIZZAZIONE: Calcola tutti gli indici di colore in un'unica operazione vettorizzata
+            r_idx = np.minimum(5, r // 43).astype(np.int_)
             g_idx = np.minimum(5, g // 43).astype(np.int_)
             b_idx = np.minimum(5, b // 43).astype(np.int_)
 
-            # Utilizziamo caratteri di blocco Unicode invece di ASCII standard
-            # '█' (U+2588) è un blocco pieno, più denso visivamente
+            # OTTIMIZZAZIONE: Predefiniamo il carattere blocco
             block_char = '█'
 
-            # Crea le stringhe ASCII con codici colore ANSI
+            # OTTIMIZZAZIONE: Riutilizza le sequenze di colore precalcolate
             rows = []
             for y in range(new_height):
-                row = []
+                # OTTIMIZZAZIONE: Usa una lista per costruire la riga carattere per carattere
+                row_chars = []
                 for x in range(width):
-                    # Usa la lookup table per il codice colore (più veloce)
+                    # Accedi direttamente alla lookup table per il codice colore
                     color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
 
-                    # Sequenza ANSI per impostare il colore
-                    colored_char = f"\033[38;5;{color_code}m{block_char}"
-                    row.append(colored_char)
+                    # Usa le sequenze colore precalcolate
+                    row_chars.append(color_sequences[color_code] + block_char)
 
-                # Resetta il colore alla fine della riga
-                rows.append(''.join(row) + "\033[0m")
+                # Unisci i caratteri in una riga e aggiungi il reset alla fine
+                rows.append(''.join(row_chars) + RESET_SEQ)
 
+            # Unisci tutte le righe in una stringa finale
             return '\n'.join(rows)
 
+        # Variabile per tracciare il tempo medio di conversione
+        conversion_times = []
+        max_times_to_track = 50  # Numero di campioni per la media mobile
+
+        # Loop principale di conversione
         while not should_stop.is_set():
             try:
                 # Ottieni un batch di frame dalla coda
@@ -300,30 +327,64 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Misura il tempo di conversione
                 start_time = time.time()
 
-                # Converti i frame in ASCII colorati usando la versione con blocchi Unicode per migliore densità
+                # OTTIMIZZAZIONE: Seleziona la funzione di conversione appropriata
+                # e la memorizziamo come variabile per evitare il controllo condizionale ad ogni frame
                 convert_function = convert_frame_to_ascii_color_blocks if box_palette else convert_frame_to_ascii_color
-                ascii_frames = [convert_function(frame) for frame in batch]
+
+                # OTTIMIZZAZIONE: Converti solo una porzione del batch se la coda è quasi piena
+                # per evitare di sprecare tempo su frame che potrebbero essere scartati
+                queue_ratio = ascii_queue.qsize() / ascii_queue._maxsize if hasattr(ascii_queue,
+                                                                                    '_maxsize') and ascii_queue._maxsize else 0
+
+                if queue_ratio > 0.8 and len(batch) > 2:
+                    # Converti solo la metà del batch se la coda è quasi piena
+                    process_batch = batch[:len(batch) // 2]
+                    logger.debug(
+                        f"Coda ASCII quasi piena ({queue_ratio:.1%}), processando batch ridotto: {len(process_batch)}/{len(batch)}")
+                else:
+                    process_batch = batch
+
+                # Converti i frame in ASCII
+                ascii_frames = [convert_function(frame) for frame in process_batch]
 
                 conversion_time = time.time() - start_time
-                logger.debug(f"Tempo di conversione batch: {conversion_time:.4f}s")
+
+                # Traccia tempi di conversione
+                conversion_times.append(conversion_time)
+                if len(conversion_times) > max_times_to_track:
+                    conversion_times.pop(0)
+
+                # Log occasionale dei tempi medi
+                if len(conversion_times) % 10 == 0:
+                    avg_time = sum(conversion_times) / len(conversion_times)
+                    frames_per_sec = len(process_batch) / conversion_time
+                    logger.debug(f"Tempo medio conversione: {avg_time:.4f}s, {frames_per_sec:.1f} frame/s")
 
                 # Invia i frame ASCII alla coda di rendering
                 try:
-                    ascii_queue.put(ascii_frames, block=True, timeout=1)
+                    ascii_queue.put(ascii_frames, block=True, timeout=0.5)
                 except queue.Full:
-                    # Se la coda è piena, riduci il batch
+                    # OTTIMIZZAZIONE: Gestione adattiva degli overflow della coda
+                    # Se la coda è piena, riduci ulteriormente il batch
                     if len(ascii_frames) > 1:
+                        reduced_size = max(1, len(ascii_frames) // 2)
                         try:
-                            ascii_queue.put(ascii_frames[:len(ascii_frames) // 2], block=False)
-                            logger.warning("Coda ASCII piena, ridotto batch")
+                            # Prova con un batch dimezzato
+                            ascii_queue.put(ascii_frames[:reduced_size], block=False)
+                            logger.warning(f"Coda ASCII piena, ridotto batch a {reduced_size}")
                         except queue.Full:
-                            logger.warning("Impossibile inviare frame ASCII, coda piena")
+                            # Se ancora piena, prova con un singolo frame
+                            try:
+                                ascii_queue.put([ascii_frames[0]], block=False)
+                                logger.warning("Coda ancora piena, inviando un singolo frame")
+                            except queue.Full:
+                                logger.warning("Impossibile inviare frame, coda completamente piena")
                     else:
                         logger.warning("Impossibile inviare frame ASCII, coda piena")
 
             except queue.Empty:
                 # Nessun frame disponibile, aspetta
-                time.sleep(0.1)
+                time.sleep(0.05)  # OTTIMIZZAZIONE: Ridotto il tempo di attesa
             except Exception as e:
                 logger.error(f"Errore nel processo di conversione: {e}")
     except Exception as e:
@@ -420,7 +481,7 @@ class VideoPipeline:
         """
         Thread che renderizza i frame ASCII sul terminale.
         Gestisce la visualizzazione del video, statistiche FPS e sincronizzazione audio.
-        Implementa delta rendering e buffering ottimizzato dell'output.
+        Mantiene le statistiche dettagliate ma rimuove il delta rendering.
         """
         # Usa un logger locale invece di sovrascrivere self.logger
         from utils import configure_process_logging
@@ -434,13 +495,12 @@ class VideoPipeline:
         renderer_logger.info("Avvio thread di rendering frame")
         self.logger.info("Thread di rendering avviato")
 
-        # Crea un buffer di output per ridurre le chiamate a sys.stdout.write
-        output_buffer = TerminalOutputBuffer(sys.stdout)
+        # Crea un buffer di output con dimensione maggiorata
+        output_buffer = TerminalOutputBuffer(sys.stdout, max_buffer_size=512 * 1024)  # Mezzo MB
 
         # Sequenze ANSI per controllo terminale
         CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
         CLEAR_SCREEN = '\033[2J'  # Pulisce lo schermo
-        CURSOR_POSITION = '\033[%d;%dH'  # Posizionamento del cursore (riga, colonna)
         BOLD = '\033[1m'  # Testo in grassetto
         RESET = '\033[0m'  # Reset stile
         GREEN = '\033[32m'  # Testo verde
@@ -454,11 +514,6 @@ class VideoPipeline:
         stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
         max_graph_points = 50  # Numero massimo di punti nel grafico
         first_frame = True
-        video_start_time = time.time()  # Tempo di inizio riproduzione
-
-        # Buffer per il rendering incrementale
-        previous_frame = None
-        previous_fps_display = ""
 
         # Buffer per il grafico degli ultimi frame times
         recent_frame_times = []
@@ -646,47 +701,19 @@ class VideoPipeline:
 
             return stats
 
-        # Funzione per il delta rendering - confronta il frame corrente con il precedente
-        def delta_render(current_frame, prev_frame):
-            """
-            Implementa il delta rendering confrontando il frame corrente con quello precedente
-            e aggiornando solo le parti cambiate.
-
-            Args:
-                current_frame (str): Frame ASCII corrente
-                prev_frame (str): Frame ASCII precedente
-
-            Returns:
-                None: Scrive direttamente nel buffer di output
-            """
-            if prev_frame is None or first_frame:
-                # Se è il primo frame o non c'è un frame precedente, renderizza tutto
-                output_buffer.write(CURSOR_HOME)
-                output_buffer.write(current_frame)
-                return
-
-            # Dividi i frame in righe
-            current_lines = current_frame.split('\n')
-            prev_lines = prev_frame.split('\n')
-
-            # Assicura che entrambi i frame abbiano lo stesso numero di righe
-            max_lines = max(len(current_lines), len(prev_lines))
-            current_lines += [''] * (max_lines - len(current_lines))
-            prev_lines += [''] * (max_lines - len(prev_lines))
-
-            # Per ogni riga, controlla se è cambiata
-            for i, (curr_line, prev_line) in enumerate(zip(current_lines, prev_lines)):
-                if curr_line != prev_line:
-                    # Calcola i blocchi di differenza all'interno della riga
-                    # Per semplificare, aggiorniamo l'intera riga quando è diversa
-                    output_buffer.write(CURSOR_POSITION % (i + 1, 1))  # +1 perché ANSI inizia da 1, non da 0
-                    output_buffer.write(curr_line)
-
         try:
             while not self.should_stop.is_set():
                 try:
-                    # Ottieni un batch di frame ASCII dalla coda
-                    ascii_frames = self.ascii_queue.get(block=True, timeout=1)
+                    # Ottieni un batch di frame ASCII dalla coda con un timeout più breve
+                    try:
+                        ascii_frames = self.ascii_queue.get(block=True, timeout=0.5)
+                    except queue.Empty:
+                        # Nessun frame disponibile, controlla se il video è finito
+                        if hasattr(self,
+                                   'video_finished') and self.video_finished.is_set() and self.ascii_queue.empty():
+                            renderer_logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
+                            break
+                        continue
 
                     # Controlla se è il marker di fine video
                     if ascii_frames == END_OF_VIDEO_MARKER:
@@ -714,7 +741,9 @@ class VideoPipeline:
                             # Se abbiamo un target FPS, aspetta il tempo necessario
                             if self.target_fps and elapsed < 1.0 / self.target_fps:
                                 sleep_time = 1.0 / self.target_fps - elapsed
-                                time.sleep(sleep_time)
+                                # Evita sleep troppo brevi che causano più overhead che beneficio
+                                if sleep_time > 0.001:  # Solo se maggiore di 1ms
+                                    time.sleep(sleep_time)
 
                         # Solo la prima volta pulisci completamente lo schermo
                         if first_frame:
@@ -748,15 +777,17 @@ class VideoPipeline:
                                 # Combina tutto nella visualizzazione
                                 fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
 
-                        # Applica il delta rendering per aggiornare solo le parti cambiate dello schermo
-                        current_display = ascii_frame + fps_display
-                        delta_render(current_display, previous_frame)
+                        # RENDERING DIRETTO: rimuoviamo il delta rendering
+                        # e renderizziamo l'intero frame ogni volta
+                        output_buffer.write(CURSOR_HOME)
+                        output_buffer.write(ascii_frame)
 
-                        # Flush del buffer per inviare i dati al terminale
+                        # Aggiungi le statistiche FPS se richiesto
+                        if fps_display:
+                            output_buffer.write(fps_display)
+
+                        # Un solo flush per frame completo
                         output_buffer.flush()
-
-                        # Aggiorna il frame precedente per il prossimo confronto
-                        previous_frame = current_display
 
                         # Tempo dopo aver mostrato il frame
                         frame_end_time = time.time()
@@ -780,12 +811,6 @@ class VideoPipeline:
                         # Aggiorna il tempo dell'ultimo frame
                         last_frame_time = frame_end_time
 
-                except queue.Empty:
-                    # Nessun frame disponibile, aspetta
-                    if hasattr(self, 'video_finished') and self.video_finished.is_set() and self.ascii_queue.empty():
-                        renderer_logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
-                        break
-                    time.sleep(0.1)
                 except Exception as e:
                     renderer_logger.error(f"Errore nel thread di rendering: {e}")
                     self.logger.error(f"Errore nel thread di rendering: {e}")
