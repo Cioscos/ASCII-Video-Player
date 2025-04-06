@@ -35,8 +35,9 @@ def main():
                         help="Enable logging of conversion and rendering performance")
     parser.add_argument("--verbose", action="store_true", help="Show all log messages in the terminal")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
-    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box"], default="standard",
+    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "custom"], default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
+    parser.add_argument("--custom-palette", type=str, help="Path to a custom palette file. It can be a normal .txt file.")
     # Parametro per controllare il loop del video
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
     # Parametro per l'audio
@@ -107,13 +108,10 @@ def main():
 
     # Se l'audio è abilitato, consiglia un target FPS appropriato
     if args.audio and args.fps is None:
-        target_fps = min(30, fps_originale)  # Limita a max 30 FPS per non sovraccaricare
+        target_fps = min(30, int(fps_originale))  # Limita a max 30 FPS per non sovraccaricare
         logger.info(
             f"Audio abilitato senza FPS target specificati. Usando {target_fps} FPS per una migliore sincronizzazione.")
         args.fps = target_fps
-
-    height, width_frame = frame.shape[:2]
-    aspect_ratio = height / width_frame
 
     # Ottieni le dimensioni del terminale
     term_width, term_height = get_terminal_size()
@@ -146,15 +144,23 @@ def main():
     sys.stdout.write(HIDE_CURSOR)
     sys.stdout.flush()
 
+    # Controllo sulle impostazioni palette
+    if args.custom_palette and args.palette != 'custom':
+        logger.warning(f"La custom palette non sara' utilizzata perché è stata utilizzata la palette {args.palette} e non 'custom'")
+
     # Ottieni la palette di caratteri ASCII in base alla scelta dell'utente
     if args.palette != 'box':
-        palette_map = {
-            "basic": " .:-=+*#%@",
-            "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
-            "extended": " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
-        }
-        ascii_palette = palette_map[args.palette]
-        logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
+        if args.palette == 'custom':
+            with open(args.custom_palette, 'r') as f:
+                ascii_palette = f.read().strip()
+        else :
+            palette_map = {
+                "basic": " .:-=+*#%@",
+                "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
+                "extended": " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+            }
+            ascii_palette = palette_map[args.palette]
+            logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
     else:
         logger.info(f"Utilizzando metodo palette box")
         ascii_palette = 'box'
