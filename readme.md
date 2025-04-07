@@ -95,8 +95,6 @@ The system uses a multi-process parallel pipeline with:
 2. **ASCII Conversion Process**: transforms frames into colored ASCII representations
 3. **Rendering Thread**: displays ASCII frames on the terminal and manages synchronization
 
-![Architecture](https://via.placeholder.com/800x300?text=Pipeline+Architecture)
-
 ### Code Structure
 
 - `main.py`: Application entry point, CLI argument handling
