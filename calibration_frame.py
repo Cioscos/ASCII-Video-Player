@@ -9,9 +9,14 @@ SHOW_CURSOR = '\033[?25h'
 CLEAR_SCREEN = '\033[2J\033[H'
 RESET_TERMINAL = '\033[!p\033[2J\033[H'  # Reset completo del terminale
 
+
 def generate_calibration_frame(width, height):
     """
-    Genera un frame ASCII di calibrazione tutto bianco, con un bordo e una croce centrale.
+    Genera un frame ASCII di calibrazione con bordo e croce centrale.
+
+    Crea un frame di calibrazione composto da caratteri ASCII per aiutare l'utente
+    a regolare le dimensioni del terminale in modo che il video venga visualizzato
+    correttamente.
 
     Args:
         width (int): Larghezza dell'output ASCII.
@@ -20,7 +25,7 @@ def generate_calibration_frame(width, height):
     Returns:
         str: Stringa ASCII con il frame bianco, bordi e croce centrale.
     """
-    # Caratteri
+    # Caratteri per il disegno del frame
     BORDER_CHAR = "#"
     CROSS_CHAR = "+"
     WHITE_CHAR = "█"  # Blocchi pieni per simulare un frame bianco
@@ -29,11 +34,8 @@ def generate_calibration_frame(width, height):
     width = max(3, width)
     height = max(3, height)
 
-    # Crea una matrice di caratteri bianchi
-    # Ottimizzazione: pre-allocazione delle stringhe di riga
-    rows = [BORDER_CHAR * width]
-
-    # Riga superiore (bordo)
+    # Pre-allocazione delle stringhe di riga
+    rows = [BORDER_CHAR * width]  # Riga superiore (bordo)
 
     # Righe intermedie
     for y in range(1, height - 1):
@@ -62,14 +64,17 @@ def generate_calibration_frame(width, height):
 
 def render_calibration_frame(width, height):
     """
-    Mostra un frame di calibrazione nel terminale e attende che l'utente prema ENTER.
-    Dopo l'input, il terminale viene svuotato e il buffer di scorrimento viene rimosso.
+    Mostra un frame di calibrazione nel terminale e attende l'input dell'utente.
+
+    Visualizza un frame di calibrazione che aiuta l'utente a regolare le dimensioni
+    del terminale per una corretta visualizzazione del video. Attende che l'utente
+    prema ENTER quando il frame è visualizzato correttamente.
 
     Args:
         width (int): Larghezza dell'output ASCII.
         height (int): Altezza dell'output ASCII.
     """
-    # Log delle dimensioni effettive del frame di calibrazione
+    # Log delle dimensioni del frame di calibrazione
     logging.info(f"Generazione frame di calibrazione: {width}x{height}")
 
     # Ottieni dimensioni terminale
@@ -78,7 +83,7 @@ def render_calibration_frame(width, height):
     # Genera il frame di calibrazione
     calibration_frame = generate_calibration_frame(width, height)
 
-    # Conta e log delle dimensioni effettive
+    # Calcola dimensioni effettive
     lines = calibration_frame.split('\n')
     actual_height = len(lines)
     actual_width = max(len(line) for line in lines)
@@ -110,6 +115,6 @@ def render_calibration_frame(width, height):
     sys.stdout.write(RESET_TERMINAL)
     sys.stdout.flush()
 
-    # Ripristina il cursore (sarà poi nascosto di nuovo all'avvio della pipeline)
+    # Ripristina il cursore
     sys.stdout.write(SHOW_CURSOR)
     sys.stdout.flush()
