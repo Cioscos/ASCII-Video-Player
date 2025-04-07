@@ -7,6 +7,9 @@ class AsciiRenderer:
     """
     Classe che gestisce il rendering dei frame ASCII sul terminale.
 
+    Si occupa della visualizzazione sincronizzata dei frame ASCII
+    rispettando il target FPS e fornendo statistiche sulla performance.
+
     Attributes:
         target_fps (int): FPS target per la visualizzazione
         log_fps (bool): Se True, registra le informazioni sugli FPS effettivi
@@ -39,6 +42,8 @@ class AsciiRenderer:
         """
         Renderizza un frame ASCII sul terminale.
 
+        Gestisce il timing in base al target FPS e calcola le statistiche di performance.
+
         Args:
             ascii_frame (str): Il frame ASCII da renderizzare
 
@@ -55,12 +60,11 @@ class AsciiRenderer:
                 time.sleep(1.0 / self.target_fps - elapsed)
                 now = time.time()
 
-        # Usa sequenze ANSI per posizionare il cursore e cancellare lo schermo
-        # Prima volta: pulisci l'intero schermo
+        # Pulisci schermo al primo frame
         if self.last_render_time is None:
             sys.stdout.write(self.CLEAR_SCREEN)
 
-        # Sposta il cursore all'inizio e sovrascrivi il contenuto precedente
+        # Rendering del frame
         sys.stdout.write(self.CURSOR_HOME)
         sys.stdout.write(ascii_frame)
         sys.stdout.flush()
@@ -68,11 +72,11 @@ class AsciiRenderer:
         render_time = time.time() - now
         self.last_render_time = now
 
-        # Registra le informazioni sugli FPS
+        # Registra le statistiche FPS
         if self.log_fps:
             self.frame_times.append(render_time)
             if len(self.frame_times) > 100:
-                self.frame_times.pop(0)
+                self.frame_times.pop(0)  # Mantieni solo gli ultimi 100 frame
 
         return render_time
 
@@ -80,8 +84,10 @@ class AsciiRenderer:
         """
         Calcola le statistiche sugli FPS.
 
+        Elabora i tempi di rendering per fornire dati sulla performance.
+
         Returns:
-            dict: Dizionario con le statistiche sugli FPS
+            dict: Dizionario con statistiche sugli FPS {avg_fps, min_fps, max_fps}
         """
         if not self.frame_times:
             return {"avg_fps": 0, "min_fps": 0, "max_fps": 0}
