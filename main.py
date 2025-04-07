@@ -16,9 +16,11 @@ SHOW_CURSOR = '\033[?25h'
 
 def main():
     """
-    Funzione principale che inizializza e gestisce l'applicazione ASCII video.
-    Gestisce il parsing degli argomenti, la configurazione del logging e
-    l'avvio della pipeline di elaborazione video.
+    Funzione principale dell'applicazione ASCII video.
+
+    Gestisce il parsing degli argomenti da riga di comando, la configurazione del logging,
+    l'avvio della pipeline di elaborazione video e la gestione del ciclo di vita
+    dell'applicazione.
 
     Returns:
         int: Codice di uscita del programma (0 per successo, 1 per errore)
@@ -35,12 +37,12 @@ def main():
                         help="Enable logging of conversion and rendering performance")
     parser.add_argument("--verbose", action="store_true", help="Show all log messages in the terminal")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
-    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "custom"], default="standard",
+    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "custom"],
+                        default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
-    parser.add_argument("--custom-palette", type=str, help="Path to a custom palette file. It can be a normal .txt file.")
-    # Parametro per controllare il loop del video
+    parser.add_argument("--custom-palette", type=str,
+                        help="Path to a custom palette file. It can be a normal .txt file.")
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
-    # Parametro per l'audio
     parser.add_argument("--audio", action="store_true", help="Enable audio playback")
 
     args = parser.parse_args()
@@ -70,7 +72,7 @@ def main():
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-        # Usa il livello INFO per il terminale se verbose è attivo, altrimenti WARNING
+        # Livello INFO per terminale se verbose è attivo, altrimenti WARNING
         console_level = logging.INFO if args.verbose else logging.WARNING
         logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
 
@@ -82,7 +84,7 @@ def main():
                 "Terminale non supporta UTF-8. Alcuni caratteri potrebbero non essere visualizzati correttamente.")
 
     except Exception as e:
-        # In caso di errore nella configurazione della codifica, usa una configurazione più semplice
+        # Configurazione più semplice in caso di errore
         console_level = logging.INFO if args.verbose else logging.WARNING
         logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
         logger.warning(f"Impossibile configurare la codifica UTF-8: {e}")
@@ -106,9 +108,9 @@ def main():
         logger.error("Errore: impossibile leggere il primo frame.")
         return 1
 
-    # Se l'audio è abilitato, consiglia un target FPS appropriato
+    # Suggerimento FPS per audio
     if args.audio and args.fps is None:
-        target_fps = min(30, int(fps_originale))  # Limita a max 30 FPS per non sovraccaricare
+        target_fps = min(30, int(fps_originale))  # Limita a max 30 FPS
         logger.info(
             f"Audio abilitato senza FPS target specificati. Usando {target_fps} FPS per una migliore sincronizzazione.")
         args.fps = target_fps
@@ -117,14 +119,11 @@ def main():
     term_width, term_height = get_terminal_size()
     logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
 
-    # Usiamo il valore specificato dall'utente senza avvisi
-    # Il frame di calibrazione serve proprio per regolare la dimensione dei caratteri
+    # Usa larghezza specificata dall'utente
     width = args.width
     logger.info(f"Utilizzando larghezza ASCII specificata: {width}")
 
-    # Calcola l'altezza proporzionale mantenendo le proporzioni originali del video
-    # I caratteri ASCII non sono quadrati, ma più alti che larghi.
-    # Usiamo un fattore di correzione di circa 2.0-2.5 per compensare
+    # Calcola l'altezza proporzionale
     height, width_frame = frame.shape[:2]
     aspect_ratio = height / width_frame
     char_aspect_correction = 2.25  # Fattore di correzione per i caratteri ASCII
@@ -144,16 +143,17 @@ def main():
     sys.stdout.write(HIDE_CURSOR)
     sys.stdout.flush()
 
-    # Controllo sulle impostazioni palette
+    # Controllo palette personalizzata
     if args.custom_palette and args.palette != 'custom':
-        logger.warning(f"La custom palette non sara' utilizzata perché è stata utilizzata la palette {args.palette} e non 'custom'")
+        logger.warning(
+            f"La custom palette non sara' utilizzata perché è stata utilizzata la palette {args.palette} e non 'custom'")
 
-    # Ottieni la palette di caratteri ASCII in base alla scelta dell'utente
+    # Seleziona la palette ASCII
     if args.palette != 'box':
         if args.palette == 'custom':
             with open(args.custom_palette, 'r') as f:
                 ascii_palette = f.read().strip()
-        else :
+        else:
             palette_map = {
                 "basic": " .:-=+*#%@",
                 "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
@@ -165,7 +165,6 @@ def main():
         logger.info(f"Utilizzando metodo palette box")
         ascii_palette = 'box'
 
-
     # Inizializza la pipeline
     pipeline = VideoPipeline(
         args.video_path,
@@ -176,11 +175,18 @@ def main():
         args.log_fps,
         ascii_palette=ascii_palette,
         loop_video=not args.no_loop,
-        enable_audio=args.audio  # Passa il parametro per l'audio
+        enable_audio=args.audio
     )
 
     # Gestione dei segnali per una chiusura pulita
     def signal_handler(sig, frame):
+        """
+        Gestisce i segnali di interruzione per chiudere correttamente l'applicazione.
+
+        Args:
+            sig: Segnale ricevuto
+            frame: Frame corrente
+        """
         logger.info("Segnale di interruzione ricevuto")
         pipeline.stop()
         sys.exit(0)
