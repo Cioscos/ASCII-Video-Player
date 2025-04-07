@@ -5,17 +5,16 @@ import threading
 import logging
 import multiprocessing
 
-"""
-File con funzioni standalone per i processi multiprocessing
-"""
-
-# Definiamo un segnale di terminazione come oggetto univoco che useremo come marker
+# Marker per segnalare la fine del video
 END_OF_VIDEO_MARKER = "END_OF_VIDEO"
 
 
 def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size, loop_video=True):
     """
-    Funzione standalone per il processo di lettura frame.
+    Processo dedicato alla lettura dei frame dal video.
+
+    Estrae frame dal video a una velocità controllata e li invia alla coda
+    per la conversione. Gestisce anche il loop del video se richiesto.
 
     Args:
         video_path (str): Percorso del file video
@@ -25,7 +24,7 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
         batch_size (int): Numero di frame da processare in batch
         loop_video (bool): Se True, riavvia il video quando raggiunge la fine
     """
-    # Configura logging locale per questo processo - solo errori e avvisi al terminale
+    # Configura logging locale per questo processo
     from utils import configure_process_logging
     logger = configure_process_logging("Reader", console_level=logging.WARNING)
 
@@ -64,8 +63,9 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
             # Leggi il frame
             success, frame = video.read()
             if not success:
-                # Fine del video, riavvia o termina
+                # Fine del video
                 logger.info("Fine del video raggiunta")
+
                 # Invia gli ultimi frame in batch se presenti
                 if batch:
                     try:
@@ -77,7 +77,6 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                 if not loop_video:
                     logger.info("Invio marker di fine video")
                     try:
-                        # Invia un marker speciale per indicare la fine del video
                         frame_queue.put(END_OF_VIDEO_MARKER, block=True, timeout=1)
                     except queue.Full:
                         pass
@@ -100,7 +99,7 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                     batch = []
                     last_read_time = time.time()
                 except queue.Full:
-                    # Se la coda è piena, riduce la dimensione del batch per adattarsi
+                    # Gestione adattiva di code piene
                     time.sleep(0.1)
                     reduced_batch = batch[:batch_size // 2]
                     try:
@@ -108,7 +107,7 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                         batch = batch[batch_size // 2:]
                         last_read_time = time.time()
                     except queue.Full:
-                        # Se ancora piena, salta alcuni frame
+                        # Salta alcuni frame se la coda è ancora piena
                         batch = batch[1:]
                         logger.warning("Coda frame piena, saltando frame")
     except Exception as e:
@@ -120,17 +119,19 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
 
 def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_palette=None):
     """
-    Funzione standalone ottimizzata per il processo di conversione frame.
-    Implementa ottimizzazioni per l'elaborazione di batch e utilizza NumPy in modo più efficiente.
+    Processo dedicato alla conversione dei frame in ASCII.
+
+    Implementa ottimizzazioni per l'elaborazione di batch e utilizza NumPy per
+    conversioni vettorizzate ad alte prestazioni.
 
     Args:
         width (int): Larghezza dell'output ASCII
         frame_queue (multiprocessing.Queue): Coda per i frame video
-        ascii_queue (multiprocessing.Queue): Coda per i frame ASCII
+        ascii_queue (multiprocessing.Queue): Coda per i frame ASCII convertiti
         should_stop (multiprocessing.Event): Flag per la terminazione
         ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
     """
-    # Configura logging locale per questo processo - solo errori e avvisi al terminale
+    # Configura logging locale per questo processo
     from utils import configure_process_logging
     import cv2
     import time
@@ -144,8 +145,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
     try:
         logger.info(f"Avvio processo di conversione frame con larghezza={width}")
 
-        # Caratteri ASCII ordinati per intensità (dal più scuro al più chiaro)
-        # Se fornita una palette personalizzata, usala
+        # Prepara la palette di caratteri ASCII
         if ascii_palette:
             if ascii_palette == 'box':
                 box_palette = True
@@ -153,22 +153,18 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 ascii_chars = np.array(list(ascii_palette))
                 logger.info(f"Utilizzo palette ASCII personalizzata con {len(ascii_chars)} caratteri")
         else:
-            # Set predefinito di caratteri ASCII - Sostituiamo lo spazio con caratteri più densi
-            # Nota: invertiamo l'ordine per avere più densità sui pixel luminosi
-            ascii_chars = np.array(list(" .:+*=#%@"))  # Ordine invertito, spazio è il più scuro
+            # Set predefinito di caratteri ASCII (spazio è il più scuro)
+            ascii_chars = np.array(list(" .:+*=#%@"))
             logger.info(f"Utilizzo palette ASCII predefinita con {len(ascii_chars)} caratteri")
 
-        # OTTIMIZZAZIONE: Pre-calcolo della lookup table colori - riduce calcoli ripetuti
-        # Costruisci un array 3D di dimensione 6x6x6 per mappare direttamente (r,g,b) -> codice colore
-        # Questo evita di ricalcolare gli indici di colore per ogni pixel
+        # Pre-calcolo della lookup table colori (ottimizzazione)
         color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
         for r in range(6):
             for g in range(6):
                 for b in range(6):
                     color_lookup[r, g, b] = 16 + 36 * r + 6 * g + b
 
-        # OTTIMIZZAZIONE: Pre-calcolo delle sequenze ANSI per ogni codice colore
-        # Questo evita di formattare stringhe per ogni pixel, riducendo significativamente l'overhead
+        # Pre-calcolo delle sequenze ANSI per ogni codice colore
         color_sequences = {}
         for r in range(6):
             for g in range(6):
@@ -176,7 +172,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                     color_code = color_lookup[r, g, b]
                     color_sequences[color_code] = f"\033[38;5;{color_code}m"
 
-        # Cache sequenze ANSI più usate
+        # Cache per sequenze ANSI comuni
         RESET_SEQ = "\033[0m"
 
         height_scale = None
@@ -185,19 +181,24 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
         # Fattore di correzione per le proporzioni dei caratteri ASCII
         char_aspect_correction = 2.25
 
-        # OTTIMIZZAZIONE: conversione senza allocazioni di memoria eccessive
         def convert_frame_to_ascii_color(frame):
             """
-            Versione ottimizzata della conversione frame -> ASCII con minor allocazione di memoria.
-            Utilizza array prealloccati e riutilizza buffer ove possibile.
+            Converte un frame in ASCII con colori.
+
+            Versione ottimizzata con allocazioni di memoria minime e operazioni vettorizzate.
+
+            Args:
+                frame (numpy.ndarray): Frame video da convertire
+
+            Returns:
+                str: Rappresentazione ASCII colorata del frame
             """
             nonlocal height_scale, last_shape
 
             # Ridimensiona il frame alla larghezza desiderata
             height, width_frame, _ = frame.shape
 
-            # Calcola l'altezza proporzionale alla larghezza desiderata
-            # con correzione per l'aspect ratio dei caratteri ASCII
+            # Calcola l'altezza proporzionale con correzione aspect ratio
             if height_scale is None or last_shape != (height, width_frame):
                 height_scale = width / width_frame / char_aspect_correction
                 last_shape = (height, width_frame)
@@ -208,31 +209,26 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             if new_height < 1:
                 new_height = 1
 
-            # OTTIMIZZAZIONE: Usa INTER_NEAREST per velocità e meno artefatti in ASCII
+            # Usa INTER_NEAREST per velocità e meno artefatti in ASCII
             resized = cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_NEAREST)
 
-            # OTTIMIZZAZIONE: Calcola direttamente gray con cvtColor (più veloce delle formule manuali)
+            # Calcola direttamente la luminosità con cvtColor
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
 
-            # Ottimizzazione: elaborazione vettorizzata più efficiente
-            # Estrai i canali di colore in modo più efficiente (vista invece di copia)
+            # Estrai canali di colore come viste
             b = resized[:, :, 0]
             g = resized[:, :, 1]
             r = resized[:, :, 2]
 
-            # OTTIMIZZAZIONE: Calcola gli indici di colore in un'unica operazione vettorizzata
-            # invece di iterare su ogni pixel (molto più veloce)
+            # Calcola gli indici di colore in un'unica operazione vettorizzata
             r_idx = np.minimum(5, r // 43).astype(np.int_)  # 255 / 6 ≈ 43
             g_idx = np.minimum(5, g // 43).astype(np.int_)
             b_idx = np.minimum(5, b // 43).astype(np.int_)
 
-            # Normalizza i valori di grigio e mappali all'indice nell'array ascii_chars
-            # OTTIMIZZAZIONE: operazione vettorizzata su tutto l'array mantenendo la divisione float
-            # per evitare errori di arrotondamento con palette estese
+            # Normalizza i valori di grigio per la mappatura dei caratteri
             indices = (gray / 255.0 * (len(ascii_chars) - 1)).astype(np.int_)
 
-            # OTTIMIZZAZIONE: Costruisci le righe utilizzando liste e join
-            # invece di concatenare stringhe (molto più efficiente)
+            # Costruisci le righe con liste e join (efficiente)
             rows = []
             for y in range(new_height):
                 row_chars = []
@@ -243,26 +239,33 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                     # Usa i valori precalcolati per il codice colore
                     color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
 
-                    # Usa le sequenze colore precalcolate dal dizionario
+                    # Usa le sequenze colore precalcolate
                     row_chars.append(color_sequences[color_code] + char)
 
-                # OTTIMIZZAZIONE: Unisci l'intera riga in una volta sola, aggiungendo reset alla fine
+                # Unisci l'intera riga con reset alla fine
                 rows.append(''.join(row_chars) + RESET_SEQ)
 
-            # OTTIMIZZAZIONE: Unisci tutte le righe in un'unica stringa
+            # Unisci tutte le righe in un'unica stringa
             return '\n'.join(rows)
 
-        # Versione alternativa con blocchi Unicode, ottimizzata
         def convert_frame_to_ascii_color_blocks(frame):
             """
-            Versione ottimizzata per la conversione in blocchi Unicode.
+            Converte un frame in blocchi colorati Unicode.
+
+            Versione specifica per la modalità 'box' che usa caratteri blocco.
+
+            Args:
+                frame (numpy.ndarray): Frame video da convertire
+
+            Returns:
+                str: Rappresentazione con blocchi Unicode colorati
             """
             nonlocal height_scale, last_shape
 
             # Ridimensiona il frame alla larghezza desiderata
             height, width_frame, _ = frame.shape
 
-            # Calcola l'altezza proporzionale alla larghezza desiderata
+            # Calcola l'altezza proporzionale
             if height_scale is None or last_shape != (height, width_frame):
                 height_scale = width / width_frame / char_aspect_correction
                 last_shape = (height, width_frame)
@@ -273,43 +276,40 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
             if new_height < 1:
                 new_height = 1
 
-            # OTTIMIZZAZIONE: Usa INTER_NEAREST per un rendering più veloce
+            # Resize ottimizzato per blocchi
             resized = cv2.resize(frame, (width, new_height), interpolation=cv2.INTER_NEAREST)
 
-            # OTTIMIZZAZIONE: Estrai i canali direttamente come viste
+            # Estrai i canali come viste
             b = resized[:, :, 0]
             g = resized[:, :, 1]
             r = resized[:, :, 2]
 
-            # OTTIMIZZAZIONE: Calcola tutti gli indici di colore in un'unica operazione vettorizzata
+            # Calcola indici colore in operazione vettorizzata
             r_idx = np.minimum(5, r // 43).astype(np.int_)
             g_idx = np.minimum(5, g // 43).astype(np.int_)
             b_idx = np.minimum(5, b // 43).astype(np.int_)
 
-            # OTTIMIZZAZIONE: Predefiniamo il carattere blocco
+            # Carattere blocco Unicode
             block_char = '█'
 
-            # OTTIMIZZAZIONE: Riutilizza le sequenze di colore precalcolate
+            # Costruzione efficiente dell'output
             rows = []
             for y in range(new_height):
-                # OTTIMIZZAZIONE: Usa una lista per costruire la riga carattere per carattere
                 row_chars = []
                 for x in range(width):
-                    # Accedi direttamente alla lookup table per il codice colore
+                    # Accedi direttamente alla lookup table
                     color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
-
-                    # Usa le sequenze colore precalcolate
                     row_chars.append(color_sequences[color_code] + block_char)
 
-                # Unisci i caratteri in una riga e aggiungi il reset alla fine
+                # Unisci con reset
                 rows.append(''.join(row_chars) + RESET_SEQ)
 
-            # Unisci tutte le righe in una stringa finale
+            # Output finale
             return '\n'.join(rows)
 
-        # Variabile per tracciare il tempo medio di conversione
+        # Tracciamento performance
         conversion_times = []
-        max_times_to_track = 50  # Numero di campioni per la media mobile
+        max_times_to_track = 50  # Campioni per media mobile
 
         # Loop principale di conversione
         while not should_stop.is_set():
@@ -327,17 +327,15 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Misura il tempo di conversione
                 start_time = time.time()
 
-                # OTTIMIZZAZIONE: Seleziona la funzione di conversione appropriata
-                # e la memorizziamo come variabile per evitare il controllo condizionale ad ogni frame
+                # Seleziona funzione di conversione appropriata
                 convert_function = convert_frame_to_ascii_color_blocks if box_palette else convert_frame_to_ascii_color
 
-                # OTTIMIZZAZIONE: Converti solo una porzione del batch se la coda è quasi piena
-                # per evitare di sprecare tempo su frame che potrebbero essere scartati
+                # Gestione adattiva di carico basata sullo stato della coda
                 queue_ratio = ascii_queue.qsize() / ascii_queue._maxsize if hasattr(ascii_queue,
                                                                                     '_maxsize') and ascii_queue._maxsize else 0
 
                 if queue_ratio > 0.8 and len(batch) > 2:
-                    # Converti solo la metà del batch se la coda è quasi piena
+                    # Converti solo parte del batch se la coda è quasi piena
                     process_batch = batch[:len(batch) // 2]
                     logger.debug(
                         f"Coda ASCII quasi piena ({queue_ratio:.1%}), processando batch ridotto: {len(process_batch)}/{len(batch)}")
@@ -349,12 +347,12 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
 
                 conversion_time = time.time() - start_time
 
-                # Traccia tempi di conversione
+                # Tracciamento performance
                 conversion_times.append(conversion_time)
                 if len(conversion_times) > max_times_to_track:
                     conversion_times.pop(0)
 
-                # Log occasionale dei tempi medi
+                # Log periodico dei tempi medi
                 if len(conversion_times) % 10 == 0:
                     avg_time = sum(conversion_times) / len(conversion_times)
                     frames_per_sec = len(process_batch) / conversion_time
@@ -364,16 +362,15 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 try:
                     ascii_queue.put(ascii_frames, block=True, timeout=0.5)
                 except queue.Full:
-                    # OTTIMIZZAZIONE: Gestione adattiva degli overflow della coda
-                    # Se la coda è piena, riduci ulteriormente il batch
+                    # Gestione adattiva overflow coda
                     if len(ascii_frames) > 1:
                         reduced_size = max(1, len(ascii_frames) // 2)
                         try:
-                            # Prova con un batch dimezzato
+                            # Prova con batch dimezzato
                             ascii_queue.put(ascii_frames[:reduced_size], block=False)
                             logger.warning(f"Coda ASCII piena, ridotto batch a {reduced_size}")
                         except queue.Full:
-                            # Se ancora piena, prova con un singolo frame
+                            # Prova con singolo frame
                             try:
                                 ascii_queue.put([ascii_frames[0]], block=False)
                                 logger.warning("Coda ancora piena, inviando un singolo frame")
@@ -383,8 +380,8 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                         logger.warning("Impossibile inviare frame ASCII, coda piena")
 
             except queue.Empty:
-                # Nessun frame disponibile, aspetta
-                time.sleep(0.05)  # OTTIMIZZAZIONE: Ridotto il tempo di attesa
+                # Nessun frame disponibile
+                time.sleep(0.05)
             except Exception as e:
                 logger.error(f"Errore nel processo di conversione: {e}")
     except Exception as e:
@@ -395,7 +392,10 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
 
 class VideoPipeline:
     """
-    Classe che gestisce la pipeline parallela per la lettura, conversione e rendering dei frame video.
+    Classe che gestisce la pipeline parallela per l'elaborazione video ASCII.
+
+    Coordina i processi di lettura frame, conversione e rendering attraverso
+    code di comunicazione, implementando una soluzione efficiente e parallela.
 
     Attributes:
         video_path (str): Percorso del file video
@@ -405,6 +405,7 @@ class VideoPipeline:
         log_performance (bool): Se True, registra le informazioni sulle prestazioni
         log_fps (bool): Se True, registra le informazioni sugli FPS
         loop_video (bool): Se True, riavvia il video quando raggiunge la fine
+        enable_audio (bool): Se True, riproduce l'audio del video
     """
 
     def __init__(self, video_path, width, target_fps=None, batch_size=1,
@@ -416,8 +417,7 @@ class VideoPipeline:
         Args:
             video_path (str): Percorso del file video
             width (int): Larghezza dell'output ASCII
-            target_fps (int, optional): FPS target per l'estrazione dei frame.
-                                        Se None, estrae alla massima velocità possibile.
+            target_fps (int, optional): FPS target per l'estrazione dei frame
             batch_size (int): Numero di frame da processare in batch
             log_performance (bool): Se True, registra le informazioni sulle prestazioni
             log_fps (bool): Se True, registra le informazioni sugli FPS
@@ -438,8 +438,7 @@ class VideoPipeline:
         # Flag per indicare che il video è finito
         self.video_finished = multiprocessing.Event()
 
-        # Coda di comunicazione tra processi
-        # Usiamo un maxsize per evitare di sovraccaricare la memoria
+        # Code di comunicazione tra processi
         queue_size = max(10, batch_size * 3)
         self.frame_queue = multiprocessing.Queue(maxsize=queue_size)
         self.ascii_queue = multiprocessing.Queue(maxsize=queue_size)
@@ -467,7 +466,7 @@ class VideoPipeline:
         self.current_frame = 0
         self.total_frames = 0
 
-        # Se l'audio è abilitato, inizializza il player audio
+        # Inizializzazione audio se abilitato
         if self.enable_audio:
             try:
                 from audio_player import AudioPlayer
@@ -480,10 +479,11 @@ class VideoPipeline:
     def _frame_renderer_thread(self):
         """
         Thread che renderizza i frame ASCII sul terminale.
-        Gestisce la visualizzazione del video, statistiche FPS e sincronizzazione audio.
-        Mantiene le statistiche dettagliate ma rimuove il delta rendering.
+
+        Gestisce la visualizzazione del video, le statistiche FPS e la sincronizzazione audio.
+        Implementa anche la generazione di grafici per il monitoraggio delle prestazioni.
         """
-        # Usa un logger locale invece di sovrascrivere self.logger
+        # Importazioni e setup
         from utils import configure_process_logging
         from terminal_output_buffer import TerminalOutputBuffer
         import sys
@@ -495,8 +495,8 @@ class VideoPipeline:
         renderer_logger.info("Avvio thread di rendering frame")
         self.logger.info("Thread di rendering avviato")
 
-        # Crea un buffer di output con dimensione maggiorata
-        output_buffer = TerminalOutputBuffer(sys.stdout, max_buffer_size=512 * 1024)  # Mezzo MB
+        # Buffer di output ottimizzato
+        output_buffer = TerminalOutputBuffer(sys.stdout, max_buffer_size=512 * 1024)
 
         # Sequenze ANSI per controllo terminale
         CURSOR_HOME = '\033[H'  # Sposta il cursore all'inizio
@@ -518,11 +518,12 @@ class VideoPipeline:
         # Buffer per il grafico degli ultimi frame times
         recent_frame_times = []
 
-        # Funzione per creare il grafico ASCII del frame time
         def create_frame_time_graph(recent_times, width=30, target_fps=None):
             """
-            Crea un grafico compatto che mostra l'andamento dei tempi di frame,
-            con gestione intelligente degli outlier.
+            Crea un grafico ASCII che mostra l'andamento dei tempi di frame.
+
+            Visualizza i tempi di rendering con gestione intelligente degli outlier
+            e colori per indicare le performance.
 
             Args:
                 recent_times: Lista di tempi di frame in secondi
@@ -530,54 +531,53 @@ class VideoPipeline:
                 target_fps: FPS target (se disponibile)
 
             Returns:
-                Una stringa che rappresenta il grafico ASCII
+                str: Grafico ASCII dei tempi di frame
             """
             if not recent_times or len(recent_times) < 2:
                 return "Raccolta dati per il grafico..."
 
-            # Converti i tempi in millisecondi per maggiore leggibilità
+            # Converti in millisecondi per leggibilità
             times_ms = [t * 1000 for t in recent_times]
 
-            # Calcola il target frame time in ms (se target_fps è impostato)
+            # Target time in ms
             target_time_ms = (1000 / target_fps) if target_fps else None
 
-            # Trova i valori min/max originali
+            # Valori min/max originali
             original_min = min(times_ms)
             original_max = max(times_ms)
 
-            # Rilevamento outlier (valori anomali)
-            # Calcoliamo la mediana e la deviazione mediana assoluta (MAD)
+            # Rilevamento outlier con MAD
             times_sorted = sorted(times_ms)
             median = times_sorted[len(times_sorted) // 2]
             mad = sum(abs(x - median) for x in times_ms) / len(times_ms)
 
-            # Definiamo un outlier come un valore che si discosta dalla mediana più di 3.5 volte la MAD
+            # Outlier: valori che deviano più di 3.5 MAD
             threshold = 3.5 * mad
             outliers = [t for t in times_ms if abs(t - median) > threshold]
             has_outliers = len(outliers) > 0
 
-            # Se abbiamo outlier, filtriamoli per la visualizzazione del grafico principale
+            # Filtra outlier per visualizzazione
             filtered_times = times_ms
             if has_outliers:
                 filtered_times = [t for t in times_ms if abs(t - median) <= threshold]
-                if not filtered_times:  # Se abbiamo filtrato tutto, manteniamo almeno alcuni valori
-                    filtered_times = times_sorted[:int(len(times_ms) * 0.8)]  # Prendiamo l'80% dei valori più bassi
+                if not filtered_times:
+                    filtered_times = times_sorted[:int(len(times_ms) * 0.8)]
 
-            # Calcola min/max per il grafico filtrato
+            # Calcola min/max per grafico filtrato
             min_time = min(filtered_times)
             max_time = max(filtered_times)
 
-            # Assicura un intervallo minimo per evitare divisioni per zero
+            # Assicura intervallo minimo
             range_time = max_time - min_time
-            if range_time < 0.5:  # Se la differenza è minima (meno di 0.5ms)
+            if range_time < 0.5:
                 mid_value = (max_time + min_time) / 2
                 min_time = mid_value - 0.5
                 max_time = mid_value + 0.5
 
-            # Caratteri per il grafico a blocchi (dal più basso al più alto)
+            # Caratteri blocchi per grafico
             block_chars = " ▁▂▃▄▅▆▇█"
 
-            # Crea l'intestazione
+            # Intestazione
             if has_outliers:
                 header = f"{BOLD}Frame Time (ms){RESET}: min={original_min:.1f} max={original_max:.1f}"
                 if target_time_ms:
@@ -588,30 +588,28 @@ class VideoPipeline:
                 if target_time_ms:
                     header += f" target={target_time_ms:.1f}"
 
-            # Limita il numero di punti dati alla larghezza specificata
+            # Limita punti dati alla larghezza
             if len(times_ms) > width:
-                # Campiona i dati per adattarli alla larghezza disponibile
                 stride = len(times_ms) // width
                 samples = [times_ms[i] for i in range(0, len(times_ms), stride)][:width]
             else:
-                samples = times_ms[-width:]  # Prendi solo gli ultimi 'width' punti
+                samples = times_ms[-width:]
 
-            # Crea il grafico come una singola linea di blocchi
+            # Genera grafico a blocchi
             graph_line = ""
             for time_ms in samples:
-                # Verifica se questo punto è un outlier
+                # Verifica se outlier
                 is_outlier = abs(time_ms - median) > threshold
 
                 if is_outlier:
-                    # Gli outlier vengono sempre mostrati come blocchi pieni rossi
+                    # Outlier: blocchi rossi
                     graph_line += f"{RED}█{RESET}"
                 else:
-                    # Normalizza il valore tra 0 e 1 (rispetto ai valori filtrati)
+                    # Normalizza valore
                     normalized = max(0, min(1, (time_ms - min_time) / (max_time - min_time)))
-                    # Converti in indice del carattere del blocco (0-8)
                     block_index = min(int(normalized * (len(block_chars) - 1)), len(block_chars) - 1)
 
-                    # Scegli il colore in base al target FPS (se impostato)
+                    # Colore basato su target
                     if target_time_ms is not None:
                         if time_ms < target_time_ms * 0.85:  # Molto veloce
                             color = BLUE
@@ -624,10 +622,10 @@ class VideoPipeline:
                     else:
                         color = GREEN
 
-                    # Aggiungi il blocco colorato
+                    # Blocco colorato
                     graph_line += f"{color}{block_chars[block_index]}{RESET}"
 
-            # Crea le etichette dell'asse
+            # Etichette asse
             if min_time < 10:
                 min_label = f"{min_time:.1f}ms"
             else:
@@ -638,56 +636,65 @@ class VideoPipeline:
             else:
                 max_label = f"{max_time:.0f}ms"
 
-            # Calcola gli spazi per allineare le etichette
+            # Allinea etichette
             spaces = width - len(min_label) - len(max_label)
             if spaces < 1:
                 spaces = 1
 
-            # Crea la scala in basso
+            # Scala in basso
             scale = f"{min_label}{' ' * spaces}{max_label}"
 
-            # Se abbiamo outlier, aggiungi una riga extra con il valore massimo
+            # Info outlier
             if has_outliers and original_max > max_time:
                 scale += f" [{RED}max: {original_max:.1f}ms{RESET}]"
 
-            # Unisci tutto in un grafico compatto
+            # Grafico completo
             return f"{header}\n{graph_line}\n{scale}"
 
-        # Funzione per creare la stringa di statistiche FPS
         def create_fps_stats(frame_times, target_fps=None):
+            """
+            Genera statistiche FPS formattate per la visualizzazione.
+
+            Args:
+                frame_times: Lista dei tempi di frame
+                target_fps: FPS target (se disponibile)
+
+            Returns:
+                str: Stringa formattata con statistiche FPS
+            """
             if not frame_times:
                 return "Calcolando FPS..."
 
             # Calcola FPS dalle ultime misurazioni
-            recent_times = frame_times[-10:]  # Usa gli ultimi 10 frame per una media recente
+            recent_times = frame_times[-10:]  # Ultimi 10 frame
             avg_time = sum(recent_times) / len(recent_times)
             current_fps = 1.0 / avg_time
 
-            # Calcola deviazione standard per la stabilità
+            # Calcola deviazione standard per stabilità
             if len(recent_times) > 1:
                 variance = sum((t - avg_time) ** 2 for t in recent_times) / len(recent_times)
                 std_dev = variance ** 0.5
-                stability = 1 - min(1, (std_dev / avg_time))  # 0 = instabile, 1 = stabile
+                stability = 1 - min(1, (std_dev / avg_time))  # 0=instabile, 1=stabile
             else:
                 stability = 1
 
-            # Scegli il colore in base al target FPS (se disponibile)
+            # Colore in base al target
             if target_fps:
                 fps_ratio = current_fps / target_fps
-                if fps_ratio > 0.95 and fps_ratio < 1.05:  # Entro il 5% del target
+                if fps_ratio > 0.95 and fps_ratio < 1.05:  # Entro 5% del target
                     fps_color = GREEN
-                elif fps_ratio > 0.8:  # Almeno l'80% del target
+                elif fps_ratio > 0.8:  # Almeno 80% del target
                     fps_color = YELLOW
                 else:
                     fps_color = RED
             else:
                 fps_color = GREEN
 
-            # Crea barra di stabilità
+            # Barra stabilità
             stability_bar_length = int(stability * 10)
             stability_bar = f"[{'|' * stability_bar_length}{' ' * (10 - stability_bar_length)}]"
 
-            # Formatta la stringa delle statistiche
+            # Statistiche formattate
             stats = (
                 f"{BOLD}FPS: {fps_color}{current_fps:.1f}{RESET} "
                 f"| Stabilità: {stability_bar} "
@@ -704,18 +711,18 @@ class VideoPipeline:
         try:
             while not self.should_stop.is_set():
                 try:
-                    # Ottieni un batch di frame ASCII dalla coda con un timeout più breve
+                    # Ottieni batch di frame ASCII
                     try:
                         ascii_frames = self.ascii_queue.get(block=True, timeout=0.5)
                     except queue.Empty:
-                        # Nessun frame disponibile, controlla se il video è finito
+                        # Controllo fine video
                         if hasattr(self,
                                    'video_finished') and self.video_finished.is_set() and self.ascii_queue.empty():
                             renderer_logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
                             break
                         continue
 
-                    # Controlla se è il marker di fine video
+                    # Controllo marker fine video
                     if ascii_frames == END_OF_VIDEO_MARKER:
                         renderer_logger.info("Ricevuto marker di fine video, terminazione del renderer")
                         self.logger.info("Video terminato, chiusura thread renderer")
@@ -727,128 +734,126 @@ class VideoPipeline:
                         if self.should_stop.is_set():
                             break
 
-                        # Incrementa il contatore di frame
+                        # Incrementa contatore frame
                         frame_count += 1
                         if hasattr(self, 'current_frame'):
-                            self.current_frame = frame_count  # Aggiornamento per il player audio
+                            self.current_frame = frame_count
 
-                        # Ottieni il tempo corrente prima di eventuali attese
+                        # Tempo corrente
                         current_time = time.time()
 
-                        # Calcola il tempo trascorso dall'ultimo rendering
+                        # Gestione timing con target FPS
                         if last_frame_time is not None:
                             elapsed = current_time - last_frame_time
-                            # Se abbiamo un target FPS, aspetta il tempo necessario
                             if self.target_fps and elapsed < 1.0 / self.target_fps:
                                 sleep_time = 1.0 / self.target_fps - elapsed
-                                # Evita sleep troppo brevi che causano più overhead che beneficio
-                                if sleep_time > 0.001:  # Solo se maggiore di 1ms
+                                if sleep_time > 0.001:  # Solo se > 1ms
                                     time.sleep(sleep_time)
 
-                        # Solo la prima volta pulisci completamente lo schermo
+                        # Pulizia schermo solo al primo frame
                         if first_frame:
                             output_buffer.write(CLEAR_SCREEN)
                             first_frame = False
 
-                        # Aggiorna la sincronizzazione audio-video se abilitata
+                        # Sincronizzazione audio-video
                         if hasattr(self, 'enable_audio') and self.enable_audio and \
                                 hasattr(self, 'video_duration') and self.video_duration and \
                                 hasattr(self, 'total_frames') and self.total_frames:
-                            # Calcola il tempo di riproduzione attuale basato sul conteggio dei frame
+                            # Calcola tempo attuale in base ai frame
                             video_time = (self.current_frame / self.total_frames) * self.video_duration
 
-                            # Aggiorna il tempo nel player audio per la sincronizzazione
+                            # Aggiorna player audio
                             if hasattr(self, 'audio_player') and self.audio_player:
                                 self.audio_player.update_video_time(video_time)
 
-                        # Prepara la visualizzazione delle statistiche FPS se richiesto
+                        # Preparazione statistiche FPS
                         fps_display = ""
                         if self.log_fps:
-                            # Aggiorna le statistiche solo ogni stats_update_interval frames
                             if frame_count % stats_update_interval == 0 and frame_times:
-                                # Crea le statistiche FPS
+                                # Statistiche FPS
                                 fps_stats = create_fps_stats(frame_times, self.target_fps)
 
-                                # Crea il grafico del frame time
+                                # Grafico tempi frame
                                 frame_time_graph = create_frame_time_graph(recent_frame_times,
                                                                            width=50,
                                                                            target_fps=self.target_fps)
 
-                                # Combina tutto nella visualizzazione
+                                # Visualizzazione completa
                                 fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
 
-                        # RENDERING DIRETTO: rimuoviamo il delta rendering
-                        # e renderizziamo l'intero frame ogni volta
+                        # Rendering frame
                         output_buffer.write(CURSOR_HOME)
                         output_buffer.write(ascii_frame)
 
-                        # Aggiungi le statistiche FPS se richiesto
+                        # Aggiungi statistiche FPS
                         if fps_display:
                             output_buffer.write(fps_display)
 
-                        # Un solo flush per frame completo
+                        # Flush per visualizzazione
                         output_buffer.flush()
 
-                        # Tempo dopo aver mostrato il frame
+                        # Tempo dopo rendering
                         frame_end_time = time.time()
 
-                        # Se non è il primo frame, calcola l'intervallo completo
+                        # Calcola intervallo tra frame
                         if last_frame_time is not None:
-                            # Misura l'intervallo reale tra frame consecutivi (incluso il tempo di attesa)
                             frame_interval = frame_end_time - last_frame_time
 
-                            # Registra le informazioni sugli FPS
+                            # Registra per statistiche
                             if self.log_fps:
                                 frame_times.append(frame_interval)
                                 if len(frame_times) > 100:
                                     frame_times.pop(0)
 
-                                # Aggiorna il buffer per il grafico
+                                # Aggiorna buffer grafico
                                 recent_frame_times.append(frame_interval)
                                 if len(recent_frame_times) > max_graph_points:
                                     recent_frame_times.pop(0)
 
-                        # Aggiorna il tempo dell'ultimo frame
+                        # Aggiorna timestamp
                         last_frame_time = frame_end_time
 
                 except Exception as e:
                     renderer_logger.error(f"Errore nel thread di rendering: {e}")
                     self.logger.error(f"Errore nel thread di rendering: {e}")
         finally:
-            # Resetta il colore del terminale alla fine
+            # Reset colore terminale
             output_buffer.write("\033[0m\n")
             output_buffer.flush()
 
-            # Salva le statistiche FPS per essere usate dal metodo stop()
+            # Salva statistiche
             self.frame_times = frame_times
             renderer_logger.info("Thread di rendering frame terminato")
             self.logger.info("Thread di rendering frame terminato")
 
     def start(self):
         """
-        Avvia la pipeline video.
+        Avvia la pipeline video e tutti i suoi componenti.
+
+        Inizializza l'audio se abilitato, avvia i processi di lettura e conversione
+        frame, e il thread di rendering.
         """
         self.logger.info("Avvio pipeline video")
 
-        # Se l'audio è abilitato, ottieni informazioni sul video
+        # Inizializzazione audio
         if self.enable_audio:
             try:
                 import cv2
                 from moviepy import VideoFileClip
 
-                # Ottieni la durata del video
+                # Ottieni durata video
                 video_clip = VideoFileClip(self.video_path)
                 self.video_duration = video_clip.duration
                 video_clip.close()
 
-                # Ottieni il numero totale di frame
+                # Ottieni numero frame
                 cap = cv2.VideoCapture(self.video_path)
                 self.total_frames = int(cap.get(cv2.CAP_PROP_FPS) * self.video_duration)
                 cap.release()
 
                 self.logger.info(f"Informazioni video: durata={self.video_duration}s, frames={self.total_frames}")
 
-                # Inizializza e avvia il player audio
+                # Avvia audio
                 if self.audio_player.initialize():
                     self.audio_player.start()
                     self.logger.info("Riproduzione audio avviata")
@@ -859,24 +864,29 @@ class VideoPipeline:
                 self.logger.error(f"Errore nell'avvio dell'audio: {e}")
                 self.enable_audio = False
 
-        # Avvia il processo di lettura frame
+        # Avvia processo reader
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
             args=(
-            self.video_path, self.frame_queue, self.should_stop, self.target_fps, self.batch_size, self.loop_video),
+                self.video_path, self.frame_queue, self.should_stop, self.target_fps,
+                self.batch_size, self.loop_video
+            ),
             daemon=True
         )
         self.reader_process.start()
 
-        # Avvia il processo di conversione frame
+        # Avvia processo converter
         self.converter_process = multiprocessing.Process(
             target=frame_converter_process,
-            args=(self.width, self.frame_queue, self.ascii_queue, self.should_stop, self.ascii_palette),
+            args=(
+                self.width, self.frame_queue, self.ascii_queue, self.should_stop,
+                self.ascii_palette
+            ),
             daemon=True
         )
         self.converter_process.start()
 
-        # Avvia il thread di rendering (nel processo principale)
+        # Avvia thread renderer
         self.renderer_thread = threading.Thread(
             target=self._frame_renderer_thread,
             daemon=True
@@ -885,28 +895,28 @@ class VideoPipeline:
 
     def stop(self):
         """
-        Ferma la pipeline video con un approccio ottimizzato.
-        Implementa una strategia di terminazione più efficiente e non bloccante.
+        Ferma la pipeline video con strategia ottimizzata.
+
+        Implementa una terminazione efficiente e non bloccante di tutti i componenti,
+        gestendo in modo sicuro le risorse e le code.
         """
         self.logger.info("Arresto pipeline video")
 
-        # Imposta il flag di termine
+        # Imposta flag terminazione
         self.should_stop.set()
 
-        # Usa un tempo di timeout più breve per evitare blocchi lunghi
+        # Timeout breve per evitare blocchi
         timeout = 0.5
 
-        # Prima ferma l'audio (se presente) poiché è quello che
-        # più probabilmente può bloccare l'arresto
+        # Prima ferma l'audio
         if self.enable_audio and hasattr(self, 'audio_player') and self.audio_player:
             try:
                 self.audio_player.stop()
                 self.logger.info("Riproduzione audio terminata")
             except Exception as e:
-                # Cattura eventuali eccezioni ma non blocca la chiusura
                 self.logger.error(f"Errore durante l'arresto dell'audio: {e}")
 
-        # Svuota le code per evitare blocchi
+        # Svuota le code
         try:
             while not self.frame_queue.empty():
                 try:
@@ -925,10 +935,7 @@ class VideoPipeline:
         except:
             pass
 
-        # Gestisci lo stop dei processi in parallelo piuttosto che sequenzialmente
-        # per evitare di attendere troppo tempo se uno si blocca
-
-        # Prima imposta timeout e join per tutti
+        # Gestione parallela dei processi
         processes_to_terminate = []
 
         if hasattr(self, 'reader_process') and self.reader_process and self.reader_process.is_alive():
@@ -941,24 +948,20 @@ class VideoPipeline:
             if self.converter_process.is_alive():
                 processes_to_terminate.append(self.converter_process)
 
-        # Poi termina quelli che non si sono fermati
+        # Termina processi bloccati
         for process in processes_to_terminate:
             try:
                 process.terminate()
-                # Non aspettiamo ulteriormente dopo terminate()
             except Exception as e:
                 self.logger.error(f"Errore durante la terminazione del processo: {e}")
 
-        # Gestisci il thread di rendering - deve essere fermato per ultimo perché
-        # è nel processo principale
+        # Gestisci thread renderer
         if hasattr(self, 'renderer_thread') and self.renderer_thread and self.renderer_thread.is_alive():
             self.renderer_thread.join(timeout=timeout)
-            # Non possiamo terminare un thread, quindi se è ancora vivo dopo il timeout
-            # dobbiamo semplicemente abbandonarlo
 
-        # Ottimizzazione: stampa le statistiche FPS solo se richiesto e ci sono dati
+        # Stampa statistiche FPS se richiesto
         if self.log_fps and hasattr(self, 'frame_times') and self.frame_times:
-            # Calcola statistiche solo sui frame recenti per una maggiore precisione
+            # Usa solo i frame recenti per maggiore precisione
             recent_frames = self.frame_times[-min(len(self.frame_times), 100):]
 
             if recent_frames:
@@ -972,7 +975,7 @@ class VideoPipeline:
 
                 self.logger.info(f"FPS medio: {avg_fps:.2f}, Min: {min_fps:.2f}, Max: {max_fps:.2f}")
 
-                # Aggiungi informazioni sul target FPS
+                # Info target FPS
                 if self.target_fps:
                     self.logger.info(f"Target FPS: {self.target_fps}, FPS effettivo: {avg_fps:.2f}")
                     if avg_fps > self.target_fps * 1.1:
@@ -980,12 +983,12 @@ class VideoPipeline:
                             f"L'FPS effettivo ({avg_fps:.2f}) è molto più alto del target ({self.target_fps}). "
                             f"Potrebbe esserci un problema con il controllo FPS.")
 
-        # Assicurati che il cursore sia visibile nel terminale
+        # Ripristina cursore
         from terminal_output_buffer import TerminalOutputBuffer
         import sys
 
         output_buffer = TerminalOutputBuffer(sys.stdout)
-        output_buffer.write('\033[?25h')  # Mostra il cursore
+        output_buffer.write('\033[?25h')  # Mostra cursore
         output_buffer.flush()
 
         self.logger.info("Pipeline video terminata")
