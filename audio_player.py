@@ -9,7 +9,9 @@ import logging
 class AudioPlayer:
     """
     Classe per la riproduzione sincronizzata dell'audio di un video.
-    Gestisce la sincronizzazione A/V anche quando gli FPS sono più lenti del previsto.
+
+    Gestisce la sincronizzazione audio/video anche quando gli FPS sono più lenti del previsto,
+    adattando la riproduzione audio in tempo reale in base all'avanzamento dei frame video.
 
     Attributes:
         video_path (str): Percorso del file video
@@ -17,9 +19,12 @@ class AudioPlayer:
         should_stop (threading.Event): Flag per la terminazione
         audio_thread (threading.Thread): Thread per la riproduzione dell'audio
         sync_queue (queue.Queue): Coda per la sincronizzazione A/V
-        audio_time (float): Tempo corrente di riproduzione audio
-        video_time (float): Tempo corrente di riproduzione video
+        audio_time (float): Tempo corrente di riproduzione audio in secondi
+        video_time (float): Tempo corrente di riproduzione video in secondi
         sync_tolerance (float): Tolleranza di sincronizzazione in secondi
+        playback_started (bool): Indica se la riproduzione è iniziata
+        resync_event (threading.Event): Flag per forzare la risincronizzazione
+        initialized (bool): Indica se l'audio è stato inizializzato
     """
 
     def __init__(self, video_path, target_fps=None):
@@ -50,6 +55,12 @@ class AudioPlayer:
     def initialize(self):
         """
         Inizializza l'audio estraendolo dal video.
+
+        Estrae la traccia audio dal video usando moviepy e la prepara per la riproduzione
+        con sounddevice.
+
+        Returns:
+            bool: True se l'inizializzazione è avvenuta con successo, False altrimenti
         """
         try:
             # Estrai audio dal video usando moviepy
@@ -66,9 +77,9 @@ class AudioPlayer:
             self.audio_array = self.audio_clip.to_soundarray()
             self.samplerate = self.audio_clip.fps
 
-            # Converti in mono se stereo (opzionale ma semplifica)
+            # Mantieni l'audio in stereo se disponibile
             if len(self.audio_array.shape) > 1 and self.audio_array.shape[1] > 1:
-                self.audio_array = self.audio_array  # Mantieni stereo
+                self.audio_array = self.audio_array
 
             self.logger.info(f"Audio estratto: {self.samplerate} Hz, durata: {self.audio_clip.duration} sec")
             self.initialized = True
@@ -80,13 +91,18 @@ class AudioPlayer:
     def _audio_callback(self, outdata, frames, time_info, status):
         """
         Callback per il sounddevice stream.
-        Fornisce i dati audio da riprodurre e gestisce la sincronizzazione.
+
+        Fornisce i dati audio da riprodurre e gestisce la sincronizzazione con il video
+        in tempo reale.
 
         Args:
-            outdata: Buffer di output per i dati audio
-            frames: Numero di frame da fornire
-            time_info: Informazioni sul tempo
-            status: Stato della riproduzione
+            outdata (numpy.ndarray): Buffer di output per i dati audio
+            frames (int): Numero di frame da fornire
+            time_info (dict): Informazioni sul tempo
+            status (CallbackFlags): Stato della riproduzione
+
+        Returns:
+            CallbackStop: Segnala la fine della riproduzione se necessario
         """
         if status:
             self.logger.warning(f"Status audio: {status}")
@@ -97,7 +113,6 @@ class AudioPlayer:
 
         # Verifica se abbiamo raggiunto la fine dell'audio
         if start_idx >= len(self.audio_array):
-            # Fine dell'audio raggiunta
             outdata.fill(0)
             if not self.should_stop.is_set():
                 self.should_stop.set()
@@ -151,6 +166,8 @@ class AudioPlayer:
     def _audio_thread_func(self):
         """
         Funzione per il thread di riproduzione audio.
+
+        Avvia lo stream audio e gestisce il ciclo di vita della riproduzione.
         """
         self.logger.info("Thread audio avviato")
 
@@ -176,6 +193,11 @@ class AudioPlayer:
     def start(self):
         """
         Avvia la riproduzione dell'audio.
+
+        Inizializza l'audio se non è già stato fatto e avvia il thread di riproduzione.
+
+        Returns:
+            bool: True se l'avvio è avvenuto con successo, False altrimenti
         """
         if not self.initialized and not self.initialize():
             self.logger.warning("Audio non disponibile o non inizializzato")
@@ -193,6 +215,9 @@ class AudioPlayer:
         """
         Aggiorna il tempo di riproduzione video e gestisce la sincronizzazione.
 
+        Confronta il tempo video con il tempo audio e invia comandi di sincronizzazione
+        quando necessario.
+
         Args:
             current_time (float): Tempo corrente di riproduzione video in secondi
         """
@@ -208,40 +233,35 @@ class AudioPlayer:
     def stop(self):
         """
         Ferma la riproduzione dell'audio con gestione ottimizzata delle risorse.
-        Implementa una chiusura non bloccante con un timeout molto breve.
+
+        Implementa una chiusura non bloccante con un timeout molto breve per evitare
+        di bloccare l'applicazione durante la chiusura.
         """
         if not hasattr(self, 'should_stop') or self.should_stop.is_set():
-            # Già in fase di chiusura o non inizializzato, evita duplicazione
+            # Già in fase di chiusura o non inizializzato
             return
 
         self.logger.info("Arresto riproduzione audio")
         self.should_stop.set()
 
-        # Timeout molto ridotto per il join del thread audio
-        # Usiamo un approccio non bloccante per evitare ritardi nella chiusura
+        # Timeout ridotto per il join del thread audio
         if hasattr(self, 'audio_thread') and self.audio_thread and self.audio_thread.is_alive():
             # Timeout di soli 100ms - se non termina velocemente, continuiamo
             self.audio_thread.join(timeout=0.1)
-            # Non aspettiamo più a lungo, ma procediamo con la pulizia delle risorse
 
         # Chiudi le risorse audio in modo non bloccante
         if hasattr(self, 'stream') and self.stream:
             try:
                 # Interrompi il callback loop di sounddevice
-                # Utilizziamo abort invece di close per interrompere rapidamente
                 self.stream.abort()
-                # Non attende che il buffer si svuoti
             except Exception as e:
                 self.logger.error(f"Errore durante l'abort dello stream audio: {e}")
             finally:
                 self.stream = None
 
-        # Rilascia l'audio clip senza ulteriori elaborazioni
+        # Rilascia l'audio clip
         if hasattr(self, 'audio_clip') and self.audio_clip:
             try:
-                # Utilizziamo un flag per tracciare se la chiusura è stata tentata
-                # per evitare di bloccarsi su operazioni di chiusura problematiche
-                close_attempted = False
                 self.audio_clip = None  # Rilascia immediatamente il riferimento
             except Exception as e:
                 self.logger.error(f"Errore durante la chiusura dell'audio clip: {e}")
