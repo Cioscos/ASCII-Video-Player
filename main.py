@@ -14,18 +14,13 @@ HIDE_CURSOR = '\033[?25l'
 SHOW_CURSOR = '\033[?25h'
 
 
-def main():
+def parse_arguments():
     """
-    Funzione principale dell'applicazione ASCII video.
-
-    Gestisce il parsing degli argomenti da riga di comando, la configurazione del logging,
-    l'avvio della pipeline di elaborazione video e la gestione del ciclo di vita
-    dell'applicazione.
+    Analizza gli argomenti della riga di comando.
 
     Returns:
-        int: Codice di uscita del programma (0 per successo, 1 per errore)
+        argparse.Namespace: Gli argomenti parsati
     """
-    # Parsing degli argomenti della riga di comando
     parser = argparse.ArgumentParser(
         description="Real-time ASCII video using a parallel pipeline with separate conversion and rendering."
     )
@@ -37,6 +32,8 @@ def main():
                         help="Enable logging of conversion and rendering performance")
     parser.add_argument("--verbose", action="store_true", help="Show all log messages in the terminal")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
+    parser.add_argument("--high-performance", action="store_true",
+                        help="Pre-elabora tutti i frame su disco per migliorare le performance")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "custom"],
                         default="standard",
                         help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
@@ -45,26 +42,43 @@ def main():
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
     parser.add_argument("--audio", action="store_true", help="Enable audio playback")
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Verifica che il file video esista
-    if not os.path.isfile(args.video_path):
-        print(f"Errore: Il file video '{args.video_path}' non esiste.")
-        return 1
 
-    # Verifica delle dipendenze per l'audio
+def setup_environment(args):
+    """
+    Configura l'ambiente di esecuzione, verifica dipendenze e configura il logging.
+
+    Args:
+        args (argparse.Namespace): Gli argomenti parsati
+
+    Returns:
+        tuple: (logger, has_audio, has_high_performance)
+    """
+    # Verifica dipendenze audio
+    has_audio = False
     if args.audio:
         try:
             import sounddevice
             from moviepy import AudioFileClip
             print("Dipendenze audio verificate con successo.")
+            has_audio = True
         except ImportError as e:
             print(f"Errore: impossibile abilitare l'audio. Mancano le dipendenze necessarie: {e}")
             print("Per abilitare l'audio, installa: pip install sounddevice moviepy")
             print("Continuo senza audio...")
-            args.audio = False
 
-    # Configura il sistema di logging
+    # Verifica dipendenze high-performance
+    has_high_performance = False
+    if args.high_performance:
+        try:
+            from precomputer import FramePrecomputer, PrecomputedFramePlayer
+            has_high_performance = True
+        except ImportError as e:
+            print(f"Impossibile utilizzare modalità high-performance: {e}")
+            print("Per usare questa funzionalità, installa: pip install tqdm")
+
+    # Configura logging
     try:
         import io
         import locale
@@ -89,83 +103,179 @@ def main():
         logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
         logger.warning(f"Impossibile configurare la codifica UTF-8: {e}")
 
-    # Apertura video per ottenere le dimensioni iniziali
-    cap = cv2.VideoCapture(args.video_path)
+    return logger, has_audio, has_high_performance
+
+
+def get_video_info(video_path, logger):
+    """
+    Ottiene le informazioni di base sul video.
+
+    Args:
+        video_path (str): Percorso del file video
+        logger (logging.Logger): Logger configurato
+
+    Returns:
+        tuple: (frame, fps_originale, frame_totali) o (None, None, None) in caso di errore
+    """
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        logger.error(f"Errore: Impossibile aprire il file video '{args.video_path}'.")
-        return 1
+        logger.error(f"Errore: Impossibile aprire il file video '{video_path}'.")
+        return None, None, None
 
     ret, frame = cap.read()
+    if not ret:
+        logger.error("Errore: impossibile leggere il primo frame.")
+        cap.release()
+        return None, None, None
 
-    # Ottieni informazioni sul video
     fps_originale = cap.get(cv2.CAP_PROP_FPS)
     frame_totali = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     logger.info(
-        f"Video originale: {args.video_path}, {frame.shape[1]}x{frame.shape[0]}, {fps_originale} FPS, {frame_totali} frames")
+        f"Video originale: {video_path}, {frame.shape[1]}x{frame.shape[0]}, {fps_originale} FPS, {frame_totali} frames")
 
     cap.release()
-    if not ret:
-        logger.error("Errore: impossibile leggere il primo frame.")
-        return 1
+    return frame, fps_originale, frame_totali
 
-    # Suggerimento FPS per audio
-    if args.audio and args.fps is None:
-        target_fps = min(30, int(fps_originale))  # Limita a max 30 FPS
-        logger.info(
-            f"Audio abilitato senza FPS target specificati. Usando {target_fps} FPS per una migliore sincronizzazione.")
-        args.fps = target_fps
 
-    # Ottieni le dimensioni del terminale
-    term_width, term_height = get_terminal_size()
-    logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
+def get_ascii_palette(args, logger):
+    """
+    Determina la palette ASCII da utilizzare.
 
-    # Usa larghezza specificata dall'utente
-    width = args.width
-    logger.info(f"Utilizzando larghezza ASCII specificata: {width}")
+    Args:
+        args (argparse.Namespace): Gli argomenti parsati
+        logger (logging.Logger): Logger configurato
 
-    # Calcola l'altezza proporzionale
-    height, width_frame = frame.shape[:2]
-    aspect_ratio = height / width_frame
-    char_aspect_correction = 2.25  # Fattore di correzione per i caratteri ASCII
-    new_height = int(aspect_ratio * width / char_aspect_correction)
-
-    logger.info(
-        f"Dimensioni output ASCII: {width}x{new_height} (aspect ratio video: {aspect_ratio:.2f}, corretta: {aspect_ratio / char_aspect_correction:.2f})")
-
-    # Mostra il frame di calibrazione
-    try:
-        render_calibration_frame(width, new_height)
-        logger.info("Calibrazione completata con successo")
-    except Exception as e:
-        logger.error(f"Errore durante la calibrazione: {e}")
-
-    # Nascondi il cursore prima di avviare la pipeline
-    sys.stdout.write(HIDE_CURSOR)
-    sys.stdout.flush()
-
-    # Controllo palette personalizzata
-    if args.custom_palette and args.palette != 'custom':
-        logger.warning(
-            f"La custom palette non sara' utilizzata perché è stata utilizzata la palette {args.palette} e non 'custom'")
-
-    # Seleziona la palette ASCII
+    Returns:
+        str: La palette ASCII da utilizzare
+    """
     if args.palette != 'box':
         if args.palette == 'custom':
-            with open(args.custom_palette, 'r') as f:
-                ascii_palette = f.read().strip()
-        else:
-            palette_map = {
-                "basic": " .:-=+*#%@",
-                "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
-                "extended": " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
-            }
-            ascii_palette = palette_map[args.palette]
-            logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
+            if not args.custom_palette:
+                logger.warning("È stata specificata 'custom' ma nessun file di palette. Uso 'standard'.")
+                args.palette = 'standard'
+            else:
+                try:
+                    with open(args.custom_palette, 'r') as f:
+                        ascii_palette = f.read().strip()
+                    return ascii_palette
+                except Exception as e:
+                    logger.error(f"Errore nella lettura della palette personalizzata: {e}")
+                    args.palette = 'standard'
+
+        palette_map = {
+            "basic": " .:-=+*#%@",
+            "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
+            "extended": " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+        }
+        ascii_palette = palette_map[args.palette]
+        logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
     else:
         logger.info(f"Utilizzando metodo palette box")
         ascii_palette = 'box'
 
-    # Inizializza la pipeline
+    return ascii_palette
+
+
+def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette, logger):
+    """
+    Esegue il video in modalità high-performance.
+
+    Args:
+        args (argparse.Namespace): Gli argomenti parsati
+        video_info (tuple): (frame, fps_originale, frame_totali)
+        ascii_dimensions (tuple): (width, height)
+        ascii_palette (str): Palette ASCII da utilizzare
+        logger (logging.Logger): Logger configurato
+
+    Returns:
+        int: Codice di uscita (0 per successo, altro valore per errore)
+    """
+    from precomputer import FramePrecomputer, PrecomputedFramePlayer
+
+    width, height = ascii_dimensions
+    logger.info("Modalità high-performance attivata: pre-elaborazione frame")
+
+    # Inizializza precomputer
+    precomputer = FramePrecomputer(
+        args.video_path,
+        width,
+        args.fps,
+        ascii_palette,
+        batch_size=args.batch_size
+    )
+
+    # Verifica cache esistente
+    if not precomputer.is_cache_valid():
+        print("\nPreparazione video in modalità high-performance...")
+        print("Questo processo potrebbe richiedere tempo ma migliorerà le performance.")
+        metadata = precomputer.precompute_frames()
+        if not metadata:
+            logger.error("Pre-elaborazione fallita, utilizzo pipeline standard")
+            return run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
+    else:
+        print("\nUtilizzo cache esistente in modalità high-performance")
+        metadata = precomputer.metadata
+
+    # Inizializza player
+    player = PrecomputedFramePlayer(
+        metadata,
+        args.fps,
+        not args.no_loop,
+        args.audio,
+        args.log_fps
+    )
+
+    # Nascondi cursore
+    sys.stdout.write(HIDE_CURSOR)
+    sys.stdout.flush()
+
+    try:
+        # Avvia player
+        player.start()
+
+        # Mostra istruzioni
+        print("\nASCII Video Player avviato in modalità high-performance!")
+        print("Premi Ctrl+C per terminare\n")
+        if not args.no_loop:
+            print("Il video si ripeterà automaticamente alla fine")
+        else:
+            print("Il video terminerà automaticamente alla fine")
+        if args.audio:
+            print("Audio abilitato")
+
+        # Attendi termine
+        while not player.should_stop.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Interruzione da tastiera")
+    finally:
+        # Ferma player
+        player.stop()
+
+        # Mostra cursore
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.flush()
+
+    return 0
+
+
+def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger):
+    """
+    Esegue il video in modalità standard con pipeline.
+
+    Args:
+        args (argparse.Namespace): Gli argomenti parsati
+        video_info (tuple): (frame, fps_originale, frame_totali)
+        ascii_dimensions (tuple): (width, height)
+        ascii_palette (str): Palette ASCII da utilizzare
+        logger (logging.Logger): Logger configurato
+
+    Returns:
+        int: Codice di uscita (0 per successo, altro valore per errore)
+    """
+    width, height = ascii_dimensions
+
+    # Inizializza pipeline
     pipeline = VideoPipeline(
         args.video_path,
         width,
@@ -178,15 +288,8 @@ def main():
         enable_audio=args.audio
     )
 
-    # Gestione dei segnali per una chiusura pulita
+    # Gestione segnali
     def signal_handler(sig, frame):
-        """
-        Gestisce i segnali di interruzione per chiudere correttamente l'applicazione.
-
-        Args:
-            sig: Segnale ricevuto
-            frame: Frame corrente
-        """
         logger.info("Segnale di interruzione ricevuto")
         pipeline.stop()
         sys.exit(0)
@@ -195,34 +298,111 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        # Avvia la pipeline
+        # Avvia pipeline
         pipeline.start()
 
-        # Mostra istruzioni all'utente
+        # Mostra istruzioni
         print("\nASCII Video Player avviato!")
         print("Premi Ctrl+C per terminare\n")
         if not args.no_loop:
             print("Il video si ripeterà automaticamente alla fine")
         else:
             print("Il video terminerà automaticamente alla fine")
-
         if args.audio:
             print("Audio abilitato")
 
-        # Attendi che l'utente interrompa l'esecuzione o che il video finisca
+        # Attendi termine
         while not pipeline.should_stop.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Interruzione da tastiera")
     finally:
-        # Ferma la pipeline
+        # Ferma pipeline
         pipeline.stop()
 
-        # Mostra il cursore alla fine dell'esecuzione
+        # Mostra cursore
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
 
     return 0
+
+
+def main():
+    """
+    Funzione principale dell'applicazione ASCII video.
+
+    Returns:
+        int: Codice di uscita del programma (0 per successo, 1 per errore)
+    """
+    # Parse degli argomenti
+    args = parse_arguments()
+
+    # Verifica file video
+    if not os.path.isfile(args.video_path):
+        print(f"Errore: Il file video '{args.video_path}' non esiste.")
+        return 1
+
+    # Setup ambiente e logging
+    logger, has_audio, has_high_performance = setup_environment(args)
+    args.audio = args.audio and has_audio
+    args.high_performance = args.high_performance and has_high_performance
+
+    # Ottieni info video
+    frame, fps_originale, frame_totali = get_video_info(args.video_path, logger)
+    if frame is None:
+        return 1
+
+    # Suggerimento FPS per audio
+    if args.audio and args.fps is None:
+        target_fps = min(30, int(fps_originale))  # Limita a max 30 FPS
+        logger.info(
+            f"Audio abilitato senza FPS target specificati. Usando {target_fps} FPS per una migliore sincronizzazione.")
+        args.fps = target_fps
+
+    # Calcola dimensioni ASCII
+    term_width, term_height = get_terminal_size()
+    logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
+
+    width = args.width
+    height, width_frame = frame.shape[:2]
+    aspect_ratio = height / width_frame
+    char_aspect_correction = 2.25  # Fattore di correzione per i caratteri ASCII
+    new_height = int(aspect_ratio * width / char_aspect_correction)
+
+    logger.info(
+        f"Dimensioni output ASCII: {width}x{new_height} (aspect ratio video: {aspect_ratio:.2f}, corretta: {aspect_ratio / char_aspect_correction:.2f})")
+
+    # Mostra frame di calibrazione
+    try:
+        render_calibration_frame(width, new_height)
+        logger.info("Calibrazione completata con successo")
+    except Exception as e:
+        logger.error(f"Errore durante la calibrazione: {e}")
+
+    # Nascondi cursore
+    sys.stdout.write(HIDE_CURSOR)
+    sys.stdout.flush()
+
+    # Ottieni palette ASCII
+    ascii_palette = get_ascii_palette(args, logger)
+
+    # Esegui in modalità appropriata
+    if args.high_performance:
+        return run_high_performance_mode(
+            args,
+            (frame, fps_originale, frame_totali),
+            (width, new_height),
+            ascii_palette,
+            logger
+        )
+    else:
+        return run_standard_mode(
+            args,
+            (frame, fps_originale, frame_totali),
+            (width, new_height),
+            ascii_palette,
+            logger
+        )
 
 
 if __name__ == "__main__":
