@@ -1,6 +1,6 @@
 # ASCII Video Player
 
-![ASCII Video Preview](https://github.com/Cioscos/Pixellator/blob/performance/doc/intro.png)
+![ASCII Video Preview](https://github.com/Cioscos/ASCII-Video-Player/blob/master/doc/intro.png)
 
 ## 📝 Description
 
@@ -128,7 +128,7 @@ When the `--log_fps` option is enabled, a real-time graph is displayed showing:
 - Frame rate stability
 - Graph of recent frame times with outlier detection
 
-![Performance Graph](https://github.com/Cioscos/Pixellator/blob/performance/doc/stats.png)
+![Performance Graph](https://github.com/Cioscos/ASCII-Video-Player/blob/master/doc/stats.png)
 
 ## 🎨 Available Character Palettes
 
