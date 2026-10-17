@@ -9,6 +9,31 @@ import multiprocessing
 END_OF_VIDEO_MARKER = "END_OF_VIDEO"
 
 
+def put_until_stopped(q, item, should_stop, timeout=0.1):
+    """
+    Inserisce un elemento nella coda senza mai scartarlo.
+
+    Ritenta il put finché riesce o finché should_stop è impostato.
+
+    Args:
+        q: Coda (multiprocessing.Queue o queue.Queue)
+        item: Elemento da inserire
+        should_stop: Evento di terminazione (con metodo is_set)
+        timeout (float): Attesa massima per ogni tentativo, in secondi
+
+    Returns:
+        bool: True se l'elemento è stato inserito, False se è stato richiesto lo stop
+    """
+    import queue
+    while not should_stop.is_set():
+        try:
+            q.put(item, timeout=timeout)
+            return True
+        except queue.Full:
+            continue
+    return False
+
+
 def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size, loop_video=True,
                          source_fps=None):
     """
@@ -50,8 +75,8 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
 
         # Leggi i frame in batch
         batch = []
-        frame_count = 0
         source_index = 0
+        decimated_index = 0  # Indice del frame decimato, riparte da 0 a ogni loop
 
         while not should_stop.is_set():
             # Leggi il frame
@@ -62,26 +87,22 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
 
                 # Invia gli ultimi frame in batch se presenti
                 if batch:
-                    try:
-                        frame_queue.put(batch, block=True, timeout=1)
-                    except queue.Full:
-                        pass
+                    if not put_until_stopped(frame_queue, batch, should_stop):
+                        break
+                    batch = []
 
                 # Se loop_video è False, invia il marker di fine video e termina
                 if not loop_video:
                     logger.info("Invio marker di fine video")
-                    try:
-                        frame_queue.put(END_OF_VIDEO_MARKER, block=True, timeout=1)
-                    except queue.Full:
-                        pass
+                    put_until_stopped(frame_queue, END_OF_VIDEO_MARKER, should_stop)
                     logger.info("Loop disabilitato, terminazione del processo di lettura")
                     break
 
                 # Altrimenti riavvia il video
                 logger.info("Riavvio del video...")
                 video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                batch = []
                 source_index = 0
+                decimated_index = 0
                 continue
 
             # Scarta i frame in eccesso rispetto agli FPS effettivi
@@ -90,25 +111,14 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
             if not keep:
                 continue
 
-            batch.append(frame)
-            frame_count += 1
+            batch.append((decimated_index, frame))
+            decimated_index += 1
 
-            # Quando il batch è completo, invialo alla coda
+            # Quando il batch è completo, invialo alla coda (senza scartare nulla)
             if len(batch) >= batch_size:
-                try:
-                    frame_queue.put(batch, block=True, timeout=1)
-                    batch = []
-                except queue.Full:
-                    # Gestione adattiva di code piene
-                    time.sleep(0.1)
-                    reduced_batch = batch[:batch_size // 2]
-                    try:
-                        frame_queue.put(reduced_batch, block=False)
-                        batch = batch[batch_size // 2:]
-                    except queue.Full:
-                        # Salta alcuni frame se la coda è ancora piena
-                        batch = batch[1:]
-                        logger.warning("Coda frame piena, saltando frame")
+                if not put_until_stopped(frame_queue, batch, should_stop):
+                    break
+                batch = []
     except Exception as e:
         logger.error(f"Errore nel processo di lettura frame: {e}")
     finally:
@@ -320,7 +330,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 if batch == END_OF_VIDEO_MARKER:
                     logger.info("Ricevuto marker di fine video")
                     # Passa il marker al renderer
-                    ascii_queue.put(END_OF_VIDEO_MARKER, block=True, timeout=1)
+                    put_until_stopped(ascii_queue, END_OF_VIDEO_MARKER, should_stop)
                     break
 
                 # Misura il tempo di conversione
@@ -329,20 +339,8 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Seleziona funzione di conversione appropriata
                 convert_function = convert_frame_to_ascii_color_blocks if box_palette else convert_frame_to_ascii_color
 
-                # Gestione adattiva di carico basata sullo stato della coda
-                queue_ratio = ascii_queue.qsize() / ascii_queue._maxsize if hasattr(ascii_queue,
-                                                                                    '_maxsize') and ascii_queue._maxsize else 0
-
-                if queue_ratio > 0.8 and len(batch) > 2:
-                    # Converti solo parte del batch se la coda è quasi piena
-                    process_batch = batch[:len(batch) // 2]
-                    logger.debug(
-                        f"Coda ASCII quasi piena ({queue_ratio:.1%}), processando batch ridotto: {len(process_batch)}/{len(batch)}")
-                else:
-                    process_batch = batch
-
-                # Converti i frame in ASCII
-                ascii_frames = [convert_function(frame) for frame in process_batch]
+                # Converti i frame in ASCII mantenendo l'indice del frame
+                ascii_frames = [(index, convert_function(frame)) for index, frame in batch]
 
                 conversion_time = time.time() - start_time
 
@@ -354,29 +352,12 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Log periodico dei tempi medi
                 if len(conversion_times) % 10 == 0:
                     avg_time = sum(conversion_times) / len(conversion_times)
-                    frames_per_sec = len(process_batch) / conversion_time if conversion_time > 0 else float('inf')
+                    frames_per_sec = len(batch) / conversion_time if conversion_time > 0 else float('inf')
                     logger.debug(f"Tempo medio conversione: {avg_time:.4f}s, {frames_per_sec:.1f} frame/s")
 
-                # Invia i frame ASCII alla coda di rendering
-                try:
-                    ascii_queue.put(ascii_frames, block=True, timeout=0.5)
-                except queue.Full:
-                    # Gestione adattiva overflow coda
-                    if len(ascii_frames) > 1:
-                        reduced_size = max(1, len(ascii_frames) // 2)
-                        try:
-                            # Prova con batch dimezzato
-                            ascii_queue.put(ascii_frames[:reduced_size], block=False)
-                            logger.warning(f"Coda ASCII piena, ridotto batch a {reduced_size}")
-                        except queue.Full:
-                            # Prova con singolo frame
-                            try:
-                                ascii_queue.put([ascii_frames[0]], block=False)
-                                logger.warning("Coda ancora piena, inviando un singolo frame")
-                            except queue.Full:
-                                logger.warning("Impossibile inviare frame, coda completamente piena")
-                    else:
-                        logger.warning("Impossibile inviare frame ASCII, coda piena")
+                # Invia i frame ASCII alla coda di rendering (senza scartare nulla)
+                if not put_until_stopped(ascii_queue, ascii_frames, should_stop):
+                    break
 
             except queue.Empty:
                 # Nessun frame disponibile
@@ -466,9 +447,7 @@ class VideoPipeline:
 
         # Attributi per l'audio
         self.audio_player = None
-        self.video_duration = None
         self.current_frame = 0
-        self.total_frames = 0
 
         # Inizializzazione audio se abilitato
         if self.enable_audio:
@@ -737,7 +716,7 @@ class VideoPipeline:
                         break
 
                     # Renderizza ciascun frame
-                    for ascii_frame in ascii_frames:
+                    for frame_index, ascii_frame in ascii_frames:
                         if self.should_stop.is_set():
                             break
 
@@ -755,16 +734,10 @@ class VideoPipeline:
                             output_buffer.write(CLEAR_SCREEN)
                             first_frame = False
 
-                        # Sincronizzazione audio-video
-                        if hasattr(self, 'enable_audio') and self.enable_audio and \
-                                hasattr(self, 'video_duration') and self.video_duration and \
-                                hasattr(self, 'total_frames') and self.total_frames:
-                            # Calcola tempo attuale in base ai frame
-                            video_time = (self.current_frame / self.total_frames) * self.video_duration
-
-                            # Aggiorna player audio
-                            if hasattr(self, 'audio_player') and self.audio_player:
-                                self.audio_player.update_video_time(video_time)
+                        # Sincronizzazione audio-video: tempo dall'indice del frame decimato
+                        if self.enable_audio and self.audio_player:
+                            video_time = frame_index / self.target_fps
+                            self.audio_player.update_video_time(video_time)
 
                         # Preparazione statistiche FPS
                         fps_display = ""
@@ -840,21 +813,6 @@ class VideoPipeline:
         # Inizializzazione audio
         if self.enable_audio:
             try:
-                import cv2
-                from moviepy import VideoFileClip
-
-                # Ottieni durata video
-                video_clip = VideoFileClip(self.video_path)
-                self.video_duration = video_clip.duration
-                video_clip.close()
-
-                # Ottieni numero frame
-                cap = cv2.VideoCapture(self.video_path)
-                self.total_frames = int(cap.get(cv2.CAP_PROP_FPS) * self.video_duration)
-                cap.release()
-
-                self.logger.info(f"Informazioni video: durata={self.video_duration}s, frames={self.total_frames}")
-
                 # Avvia audio
                 if self.audio_player.initialize():
                     self.audio_player.start()
