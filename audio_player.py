@@ -119,6 +119,7 @@ class AudioPlayer:
 
         Applica l'eventuale risincronizzazione pendente, copia i campioni con
         wrap-around (l'audio va in loop insieme al video) e avanza audio_time.
+        Se il tempo richiesto è oltre la fine dell'audio emette silenzio.
         Non registra log né restituisce mai CallbackStop.
 
         Args:
@@ -144,7 +145,15 @@ class AudioPlayer:
             self._pending_seek = None
             self.audio_time = seek
 
-        pos = int(self.audio_time * self.samplerate) % total
+        if self.audio_time * self.samplerate >= total:
+            # Video oltre la fine dell'audio (audio più corto): silenzio, senza
+            # ripartire dall'inizio, finché un seek non torna sotto la durata.
+            # audio_time segue il video, così non si generano seek a ogni frame.
+            outdata.fill(0)
+            self.audio_time += frames / self.samplerate
+            return
+
+        pos =int(self.audio_time * self.samplerate) % total
         done = 0
         while done < frames:
             n = min(frames - done, total - pos)
