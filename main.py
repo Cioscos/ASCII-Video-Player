@@ -51,9 +51,12 @@ def load_custom_palette(path):
     return palette
 
 
-def parse_arguments():
+def parse_arguments(argv=None):
     """
     Analizza gli argomenti della riga di comando.
+
+    Args:
+        argv (list[str] | None): Argomenti da analizzare (None usa sys.argv[1:])
 
     Returns:
         argparse.Namespace: Gli argomenti parsati
@@ -84,7 +87,21 @@ def parse_arguments():
     parser.add_argument("--cache-limit", type=str, default=DEFAULT_LIMIT,
                         help=f"Limite di spazio per cached_frames, es. 500M, 2G (0 = nessun limite, default: {DEFAULT_LIMIT})")
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+_STDIO_WRAPPED = False
+# Handler di logging aggiunti da setup_environment, rimossi alla riproduzione successiva
+_APP_LOG_HANDLERS = []
+
+
+def _reset_app_logging():
+    """Rimuove gli handler creati da una riproduzione precedente (evita log duplicati)."""
+    root = logging.getLogger()
+    for handler in _APP_LOG_HANDLERS:
+        root.removeHandler(handler)
+        handler.close()
+    _APP_LOG_HANDLERS.clear()
 
 
 def setup_environment(args):
@@ -121,12 +138,18 @@ def setup_environment(args):
             print("Per usare questa funzionalità, installa: pip install tqdm")
 
     # Configura logging
+    _reset_app_logging()
+    handlers_before = list(logging.getLogger().handlers)
     try:
         import io
         import locale
         # Imposta la codifica UTF-8 per evitare problemi con caratteri speciali
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        # (una sola volta: il menu può avviare più riproduzioni nello stesso processo)
+        global _STDIO_WRAPPED
+        if not _STDIO_WRAPPED:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+            _STDIO_WRAPPED = True
 
         # Livello INFO per terminale se verbose è attivo, altrimenti WARNING
         console_level = logging.INFO if args.verbose else logging.WARNING
@@ -145,6 +168,7 @@ def setup_environment(args):
         logger = setup_logging(args.log_fps, args.log_performance, console_level=console_level)
         logger.warning(f"Impossibile configurare la codifica UTF-8: {e}")
 
+    _APP_LOG_HANDLERS.extend(h for h in logging.getLogger().handlers if h not in handlers_before)
     return logger, has_audio, has_high_performance
 
 
@@ -439,16 +463,16 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     return exit_code
 
 
-def main():
+def play(args):
     """
-    Funzione principale dell'applicazione ASCII video.
+    Riproduce un video con gli argomenti già analizzati.
+
+    Args:
+        args (argparse.Namespace): Gli argomenti parsati
 
     Returns:
-        int: Codice di uscita del programma (0 per successo, 1 per errore)
+        int: Codice di uscita (0 per successo, 1 per errore)
     """
-    # Parse degli argomenti
-    args = parse_arguments()
-
     # Verifica limite di cache
     try:
         parse_size(args.cache_limit)
@@ -524,6 +548,89 @@ def main():
         # Ripristina colori e cursore anche se un'eccezione precede i try delle modalità
         sys.stdout.write(RESET_AND_SHOW_CURSOR)
         sys.stdout.flush()
+
+
+USAGE = ("Uso: python main.py <video> [larghezza] [opzioni]  "
+         "(senza argomenti apre il menu in un terminale interattivo)")
+
+
+def run_menu():
+    """
+    Esegue il menu interattivo.
+
+    Returns:
+        int: Codice di uscita (0 per uscita normale, 1 senza terminale interattivo)
+    """
+    if not sys.stdin.isatty():
+        print(USAGE)
+        return 1
+
+    from keyboard_input import KeyReader
+    from menu import MenuState, list_videos, load_settings, render_menu, save_settings
+
+    settings, message = load_settings()
+    state = MenuState(settings, list_videos())
+    state.message = message
+    state._refresh_caches()
+    try:
+        while True:
+            action = None
+            with KeyReader() as keys:
+                redraw = True
+                while action is None:
+                    if redraw:
+                        cols, rows = get_terminal_size()
+                        sys.stdout.write("[2J[H" + render_menu(state, cols, rows))
+                        sys.stdout.flush()
+                        redraw = False
+                    key = keys.read(0.1)
+                    if key is not None:
+                        action = state.handle_key(key)
+                        redraw = True
+            if action == "quit":
+                return 0
+            # action == "play": ricorda la scelta, poi riproduce fuori dal menu
+            try:
+                save_settings(state.settings, state.settings_path)
+            except OSError as e:
+                state.message = f"Impossibile salvare le impostazioni: {e}"
+            sys.stdout.write("[2J[H")
+            sys.stdout.flush()
+            try:
+                play(parse_arguments(state.settings.to_argv()))
+            except KeyboardInterrupt:
+                pass
+            except Exception as e:
+                logging.getLogger(__name__).exception(f"Errore durante la riproduzione dal menu: {e}")
+                state.message = f"Errore durante la riproduzione: {e}"
+            except SystemExit:
+                # argparse che rifiuta i valori salvati
+                state.message = "Impostazioni non valide per la riproduzione"
+            state.screen, state.selected = "main", 0
+            state.videos = list_videos()
+            state._refresh_caches()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        sys.stdout.write(RESET_AND_SHOW_CURSOR + "[2J[H")
+        sys.stdout.flush()
+
+
+def main(argv=None):
+    """
+    Punto di ingresso: senza argomenti apre il menu, altrimenti riproduce da riga di comando.
+
+    Args:
+        argv (list[str] | None): Argomenti (None usa sys.argv[1:])
+
+    Returns:
+        int: Codice di uscita del programma (0 per successo, 1 per errore)
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        return run_menu()
+    return play(parse_arguments(argv))
 
 
 if __name__ == "__main__":

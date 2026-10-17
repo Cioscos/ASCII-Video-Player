@@ -63,3 +63,47 @@ def test_cli_accepts_half_and_truecolor(monkeypatch):
 def test_open_controls_returns_key_reader():
     from keyboard_input import KeyReader
     assert isinstance(main._open_controls(), KeyReader)
+
+
+def test_no_args_without_tty_prints_usage(monkeypatch, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert main.main([]) == 1 and "Uso:" in capsys.readouterr().out
+
+
+def test_cli_args_go_to_play(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "play", lambda a: calls.append(a) or 0)
+    assert main.main(["v.mp4", "80"]) == 0 and calls[0].width == 80
+
+
+def test_menu_play_then_quit(monkeypatch, tmp_path):
+    import json
+    import keyboard_input
+    import menu
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "videos").mkdir()
+    video = tmp_path / "videos" / "a.mp4"
+    video.write_bytes(b"x")
+    settings = menu.Settings(video_path=str(video))
+    (tmp_path / "settings.json").write_text(json.dumps(settings.__dict__), encoding="utf-8")
+
+    keys = iter(["enter", "esc"])
+
+    class FakeKeyReader:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, timeout):
+            return next(keys)
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(keyboard_input, "KeyReader", FakeKeyReader)
+    calls = []
+    monkeypatch.setattr(main, "play", lambda a: calls.append(a) or 0)
+    assert main.main([]) == 0
+    assert len(calls) == 1 and calls[0].video_path == str(video)
+    assert (tmp_path / "settings.json").exists()

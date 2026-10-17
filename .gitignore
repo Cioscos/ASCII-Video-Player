@@ -9,3 +9,5 @@ cached_frames/
 logs/
 profile.out
 videos/
+
+settings.json
