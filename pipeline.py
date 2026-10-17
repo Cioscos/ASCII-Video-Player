@@ -355,7 +355,7 @@ def frame_converter_process(width, frame_queue, ascii_queue, should_stop, ascii_
                 # Log periodico dei tempi medi
                 if len(conversion_times) % 10 == 0:
                     avg_time = sum(conversion_times) / len(conversion_times)
-                    frames_per_sec = len(process_batch) / conversion_time
+                    frames_per_sec = len(process_batch) / conversion_time if conversion_time > 0 else float('inf')
                     logger.debug(f"Tempo medio conversione: {avg_time:.4f}s, {frames_per_sec:.1f} frame/s")
 
                 # Invia i frame ASCII alla coda di rendering

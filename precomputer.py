@@ -816,6 +816,8 @@ class PrecomputedFramePlayer:
         except Exception as e:
             self.logger.error(f"Errore durante la riproduzione: {e}")
         finally:
+            # Segnala la fine al main loop (necessario con --no-loop)
+            self.should_stop.set()
             self.logger.info("Thread di riproduzione terminato")
 
     def stop(self):
