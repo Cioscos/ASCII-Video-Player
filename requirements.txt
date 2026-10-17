@@ -1,0 +1,7 @@
+opencv-python==4.11.0.86
+numpy==2.1.3
+tqdm==4.67.1
+
+# Audio (opzionale, abilitato con --audio)
+sounddevice==0.5.1
+moviepy==2.1.2

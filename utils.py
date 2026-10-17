@@ -67,14 +67,13 @@ def configure_process_logging(process_name, console_level=logging.WARNING):
     Returns:
         logging.Logger: Logger configurato per il processo
     """
-    # Configura il logging di base
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f'%(asctime)s - %(levelname)s - {process_name} - %(message)s',
-        handlers=[]  # No handler di default
-    )
-
     logger = logging.getLogger(process_name)
+    logger.setLevel(logging.INFO)
+    # Evita la propagazione al root (log duplicati) e handler duplicati
+    logger.propagate = False
+
+    if logger.handlers:
+        return logger
 
     # Directory per i log
     log_dir = 'logs'

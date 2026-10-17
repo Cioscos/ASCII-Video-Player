@@ -1,0 +1,10 @@
+video=videos/5.mp4 width=300 palette=extended frames=300
+decode+resize ms/frame: 2.35
+convert ms/frame: 1.28
+bytes/frame: 82489
+precompute frame/s: 281.4
+video=videos/5.mp4 width=300 palette=box frames=300
+decode+resize ms/frame: 2.49
+convert ms/frame: 1.20
+bytes/frame: 127489
+precompute frame/s: 273.6
