@@ -58,13 +58,16 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
         loop_video (bool): Se True, riavvia il video alla fine
     """
     import signal
+
+    # Ctrl+C arriva a tutti i processi della console: lo gestisce solo il processo
+    # principale, che chiude la pipeline impostando should_stop. Va impostato prima
+    # degli import pesanti (cv2) per ridurre la finestra in cui il figlio lo riceve.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     import cv2
     from playback import FrameDecimator
     from utils import configure_process_logging
 
-    # Ctrl+C arriva a tutti i processi della console: lo gestisce solo il processo
-    # principale, che chiude la pipeline impostando should_stop
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
     logger = configure_process_logging("Reader", console_level=logging.WARNING)
     decimator = FrameDecimator(source_fps, target_fps)
     video = None
@@ -140,14 +143,16 @@ def frame_converter_process(width, height, palette, frame_queue, ascii_queue, sh
         should_stop (multiprocessing.Event): Evento di terminazione
         log_performance (bool): Se True, logga (DEBUG) la media dei ms/frame ogni 100 frame
     """
-    import queue
     import signal
+
+    # Ctrl+C viene gestito solo dal processo principale (vedi frame_reader_process)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    import queue
     import time
     from ascii_converter import AsciiConverter
     from utils import configure_process_logging
 
-    # Ctrl+C viene gestito solo dal processo principale (vedi frame_reader_process)
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
     logger = configure_process_logging("Converter", console_level=logging.WARNING)
     if log_performance:
         logger.setLevel(logging.DEBUG)

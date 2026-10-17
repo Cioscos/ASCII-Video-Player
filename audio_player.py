@@ -153,7 +153,7 @@ class AudioPlayer:
             self.audio_time += frames / self.samplerate
             return
 
-        pos =int(self.audio_time * self.samplerate) % total
+        pos = int(self.audio_time * self.samplerate) % total
         done = 0
         while done < frames:
             n = min(frames - done, total - pos)
