@@ -1,873 +1,260 @@
+"""
+Cache binaria dei frame ASCII per la modalità high-performance.
+
+Layout di una directory di cache:
+- frames.bin: i frame convertiti (bytes UTF-8 con sequenze ANSI) concatenati;
+- index.npy: offset int64 di inizio di ogni frame, più l'offset finale;
+- metadata.json: scritto per ultimo, solo a pre-elaborazione completata.
+
+Una directory senza metadata.json non è mai considerata valida.
+"""
 import hashlib
-import math
+import json
+import logging
+import mmap
 import os
-import sys
 
 import cv2
-import pickle
-import logging
-import threading
-import time
-import queue
 import numpy as np
 from tqdm import tqdm
 
+from ascii_converter import CONVERTER_VERSION, AsciiConverter
+from playback import FrameDecimator
 
-class _OutputBuffer:
-    """Accumula il testo e lo scrive sul terminale in un'unica operazione al flush()."""
+logger = logging.getLogger(__name__)
 
-    def __init__(self, stdout):
-        self.stdout = stdout
-        self.parts = []
+FRAMES_FILE = "frames.bin"
+INDEX_FILE = "index.npy"
+METADATA_FILE = "metadata.json"
 
-    def write(self, text):
-        self.parts.append(text)
+# Convertitore del processo worker, creato da _init_worker
+_worker_converter = None
 
-    def flush(self):
-        if not self.parts:
+
+def cache_dir_for(video_path, width, height, effective_fps, palette, cache_root="cached_frames") -> str:
+    """
+    Directory di cache per un video e i parametri di conversione.
+
+    La chiave cambia se cambiano il file (percorso, dimensione, data di modifica),
+    le dimensioni della griglia, gli fps effettivi, la palette o la versione del convertitore.
+
+    Returns:
+        str: "<cache_root>/<nome video>_<sha1[:12]>"
+    """
+    abs_path = os.path.abspath(video_path)
+    st = os.stat(abs_path)
+    key = "|".join(str(part) for part in (
+        abs_path, st.st_size, st.st_mtime_ns, int(width), int(height),
+        round(float(effective_fps), 3), palette, CONVERTER_VERSION,
+    ))
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    name = os.path.splitext(os.path.basename(abs_path))[0]
+    return os.path.join(cache_root, f"{name}_{digest}")
+
+
+def _init_worker(width, height, palette):
+    """Inizializzatore del pool: crea il convertitore del processo worker."""
+    global _worker_converter
+    from ascii_converter import AsciiConverter
+    _worker_converter = AsciiConverter(width, height, palette)
+
+
+def _convert_worker(resized):
+    """Converte nel processo worker un frame già ridimensionato."""
+    return _worker_converter.convert(resized)
+
+
+def _resized_frames(cap, converter, decimator, max_frames):
+    """Generatore dei frame decimati e ridimensionati (nel processo principale)."""
+    source_index = 0
+    kept = 0
+    while max_frames is None or kept < max_frames:
+        if not cap.grab():
             return
-        try:
-            self.stdout.write(''.join(self.parts))
-            self.stdout.flush()
-        except Exception:
-            pass
-        self.parts.clear()
+        keep = decimator.should_keep(source_index)
+        source_index += 1
+        if not keep:
+            continue
+        ok, frame = cap.retrieve()
+        if not ok:
+            continue
+        kept += 1
+        yield converter.resize(frame)
 
-class FramePrecomputer:
+
+def _remove_quietly(path):
+    """Rimuove un file ignorando l'assenza o gli errori."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def precompute(video_path, width, height, source_fps, target_fps, palette, cache_root="cached_frames",
+               processes: int | None = None, max_frames: int | None = None) -> str | None:
     """
-    Classe che gestisce la pre-elaborazione e il caching dei frame video.
+    Converte tutti i frame decimati del video e li salva nella cache binaria.
 
-    Estrae tutti i frame dal video, li converte in ASCII e li salva su disco
-    per ottimizzare le performance durante la riproduzione.
+    Decodifica, decimazione e resize avvengono nel processo principale; la conversione
+    usa un pool di processi (processes=0: nel processo corrente; None: min(cpu, 8)).
+    In caso di qualunque eccezione (anche KeyboardInterrupt) i file parziali vengono
+    rimossi e l'eccezione viene rilanciata.
 
-    Attributes:
-        video_path (str): Percorso del file video
-        width (int): Larghezza dell'output ASCII
-        target_fps (float): FPS target per l'estrazione dei frame
-        ascii_palette (str): Caratteri ASCII da utilizzare per la conversione
-        output_dir (str): Cartella dove salvare i frame elaborati
-        cache_file (str): Percorso del file di cache con i metadati
-        logger (logging.Logger): Logger per la registrazione delle operazioni
+    Returns:
+        str | None: Directory della cache, oppure None se il video non è leggibile o vuoto
     """
+    decimator = FrameDecimator(source_fps, target_fps)
+    effective_fps = decimator.effective_fps
+    cache_dir = cache_dir_for(video_path, width, height, effective_fps, palette, cache_root)
+    if processes is None:
+        processes = min(os.cpu_count() or 1, 8)
 
-    def __init__(self, video_path, width, target_fps=None, ascii_palette=None,
-                 output_dir=None, batch_size=10):
-        """
-        Inizializza il precomputer per generare e salvare i frame ASCII.
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(f"Impossibile aprire il video: {video_path}")
+        cap.release()
+        return None
 
-        Args:
-            video_path (str): Percorso del file video da processare
-            width (int): Larghezza dell'output ASCII
-            target_fps (float, optional): FPS target per l'estrazione. Se None, usa l'FPS originale
-            ascii_palette (str, optional): Caratteri da usare per la conversione ASCII
-            output_dir (str, optional): Directory per salvare i frame. Se None, usa './cached_frames'
-            batch_size (int): Numero di frame da processare in parallelo
-        """
-        self.video_path = video_path
-        self.width = width
-        self.target_fps = target_fps
-        self.ascii_palette = ascii_palette
-        self.batch_size = batch_size
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    expected = None
+    if total > 0:
+        expected = sum(1 for i in range(total) if decimator.should_keep(i))
+        if max_frames is not None:
+            expected = min(expected, max_frames)
 
-        # Crea un nome univoco basato sul file e sui parametri
-        video_name = os.path.basename(video_path).rsplit('.', 1)[0]
-        palette_hash = hashlib.sha1((ascii_palette or "").encode("utf-8")).hexdigest()[:8]
-        cache_name = f"{video_name}_w{width}_fps{target_fps or 'orig'}_p{palette_hash}"
+    os.makedirs(cache_dir, exist_ok=True)
+    metadata_path = os.path.join(cache_dir, METADATA_FILE)
+    frames_path = os.path.join(cache_dir, FRAMES_FILE)
+    tmp_path = frames_path + ".tmp"
+    index_path = os.path.join(cache_dir, INDEX_FILE)
+    # Una cache precedente non deve restare valida durante la nuova scrittura
+    _remove_quietly(metadata_path)
 
-        # Directory per la cache
-        self.output_dir = output_dir or os.path.join("cached_frames", cache_name)
-        os.makedirs(self.output_dir, exist_ok=True)
+    logger.info(f"Pre-elaborazione: {video_path}, {width}x{height}, fps effettivi {effective_fps}, "
+                f"processi {processes}, cache {cache_dir}")
+    converter = AsciiConverter(width, height, palette)
+    offsets = [0]
+    try:
+        frames_iter = _resized_frames(cap, converter, decimator, max_frames)
+        with open(tmp_path, "wb") as out, tqdm(total=expected, desc="Pre-elaborazione", unit="frame") as bar:
+            def write(data):
+                out.write(data)
+                offsets.append(offsets[-1] + len(data))
+                bar.update(1)
 
-        # File di metadati
-        self.cache_file = os.path.join(self.output_dir, "metadata.pkl")
-
-        # Setup logging
-        self.logger = logging.getLogger('FramePrecomputer')
-        self.metadata = {}
-
-    def _extract_video_info(self):
-        """
-        Estrae le informazioni di base dal video come FPS, durata, dimensioni.
-
-        Returns:
-            dict: Dizionario con le informazioni del video
-        """
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            self.logger.error(f"Impossibile aprire il video: {self.video_path}")
-            return None
-
-        # Estrai informazioni di base
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # Calcola durata
-        duration = frame_count / fps if fps > 0 else 0
-
-        # FPS effettivi di riproduzione (mai sopra quelli sorgente) e frame da estrarre
-        from playback import FrameDecimator
-        decimator = FrameDecimator(fps, self.target_fps)
-        target_fps = decimator.effective_fps
-        actual_frames = math.ceil(frame_count * decimator.ratio)
+            if processes > 0:
+                from multiprocessing import Pool
+                with Pool(processes, initializer=_init_worker, initargs=(width, height, palette)) as pool:
+                    for data in pool.imap(_convert_worker, frames_iter, chunksize=8):
+                        write(data)
+            else:
+                for resized in frames_iter:
+                    write(converter.convert(resized))
 
         cap.release()
+        if len(offsets) == 1:
+            logger.error(f"Nessun frame letto dal video: {video_path}")
+            _remove_quietly(tmp_path)
+            return None
 
-        return {
-            "original_fps": fps,
-            "target_fps": target_fps,
-            "frame_count": frame_count,
-            "actual_frames": actual_frames,
+        np.save(index_path, np.array(offsets, dtype=np.int64))
+        os.replace(tmp_path, frames_path)
+        metadata = {
+            "effective_fps": effective_fps,
+            "frames": len(offsets) - 1,
             "width": width,
             "height": height,
-            "duration": duration,
-            "ascii_width": self.width,
-            "ascii_palette": self.ascii_palette,
-            "video_path": self.video_path
+            "palette": palette,
+            "video_path": os.path.abspath(video_path),
+            "converter_version": CONVERTER_VERSION,
         }
+        with open(metadata_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False)
+        os.replace(metadata_path + ".tmp", metadata_path)
+    except BaseException:
+        cap.release()
+        for path in (metadata_path + ".tmp", metadata_path, tmp_path, frames_path, index_path):
+            _remove_quietly(path)
+        raise
 
-    def _convert_frame_to_ascii(self, frame):
-        """
-        Converte un singolo frame in rappresentazione ASCII.
-
-        Args:
-            frame (numpy.ndarray): Frame video da convertire
-
-        Returns:
-            str: Rappresentazione ASCII del frame
-        """
-        height, width_frame, _ = frame.shape
-
-        # Calcola l'altezza proporzionale
-        char_aspect_correction = 2.25
-        aspect_ratio = height / width_frame
-        new_height = int(aspect_ratio * self.width / char_aspect_correction)
-
-        # Ridimensiona il frame
-        resized = cv2.resize(frame, (self.width, new_height), interpolation=cv2.INTER_NEAREST)
-
-        # Converti in scala di grigi
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-
-        # Estrai canali di colore
-        b = resized[:, :, 0]
-        g = resized[:, :, 1]
-        r = resized[:, :, 2]
-
-        # Calcola indici colore
-        r_idx = np.minimum(5, r // 43).astype(np.int_)
-        g_idx = np.minimum(5, g // 43).astype(np.int_)
-        b_idx = np.minimum(5, b // 43).astype(np.int_)
-
-        # Prepara la palette ASCII
-        if self.ascii_palette and self.ascii_palette != 'box':
-            ascii_chars = np.array(list(self.ascii_palette))
-        else:
-            # Usa blocchi Unicode se scelto 'box'
-            if self.ascii_palette == 'box':
-                return self._convert_frame_to_box_ascii(frame)
-            # Altrimenti usa la palette di default
-            ascii_chars = np.array(list(" .:+*=#%@"))
-
-        # Normalizza i valori di grigio per la palette
-        indices = (gray / 255.0 * (len(ascii_chars) - 1)).astype(np.int_)
-
-        # Pre-calcola la lookup table colori
-        color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
-        for r in range(6):
-            for g in range(6):
-                for b in range(6):
-                    color_lookup[r, g, b] = 16 + 36 * r + 6 * g + b
-
-        # Cache delle sequenze ANSI
-        color_sequences = {}
-        for r in range(6):
-            for g in range(6):
-                for b in range(6):
-                    color_code = color_lookup[r, g, b]
-                    color_sequences[color_code] = f"\033[38;5;{color_code}m"
-
-        RESET_SEQ = "\033[0m"
-
-        # Costruisci le righe
-        rows = []
-        for y in range(new_height):
-            row_chars = []
-            for x in range(self.width):
-                char = ascii_chars[indices[y, x]]
-                color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
-                row_chars.append(color_sequences[color_code] + char)
-            rows.append(''.join(row_chars) + RESET_SEQ)
-
-        return '\n'.join(rows)
-
-    def _convert_frame_to_box_ascii(self, frame):
-        """
-        Converte un frame in blocchi colorati Unicode.
-
-        Args:
-            frame (numpy.ndarray): Frame video da convertire
-
-        Returns:
-            str: Rappresentazione con blocchi Unicode colorati
-        """
-        height, width_frame, _ = frame.shape
-
-        # Calcola l'altezza proporzionale
-        char_aspect_correction = 2.25
-        aspect_ratio = height / width_frame
-        new_height = int(aspect_ratio * self.width / char_aspect_correction)
-
-        # Ridimensiona il frame
-        resized = cv2.resize(frame, (self.width, new_height), interpolation=cv2.INTER_NEAREST)
-
-        # Estrai canali di colore
-        b = resized[:, :, 0]
-        g = resized[:, :, 1]
-        r = resized[:, :, 2]
-
-        # Calcola indici colore
-        r_idx = np.minimum(5, r // 43).astype(np.int_)
-        g_idx = np.minimum(5, g // 43).astype(np.int_)
-        b_idx = np.minimum(5, b // 43).astype(np.int_)
-
-        # Pre-calcola la lookup table colori
-        color_lookup = np.zeros((6, 6, 6), dtype=np.int16)
-        for r in range(6):
-            for g in range(6):
-                for b in range(6):
-                    color_lookup[r, g, b] = 16 + 36 * r + 6 * g + b
-
-        # Cache delle sequenze ANSI
-        color_sequences = {}
-        for r in range(6):
-            for g in range(6):
-                for b in range(6):
-                    color_code = color_lookup[r, g, b]
-                    color_sequences[color_code] = f"\033[38;5;{color_code}m"
-
-        RESET_SEQ = "\033[0m"
-        block_char = '█'
-
-        # Costruisci le righe
-        rows = []
-        for y in range(new_height):
-            row_chars = []
-            for x in range(self.width):
-                color_code = color_lookup[r_idx[y, x], g_idx[y, x], b_idx[y, x]]
-                row_chars.append(color_sequences[color_code] + block_char)
-            rows.append(''.join(row_chars) + RESET_SEQ)
-
-        return '\n'.join(rows)
-
-    def precompute_frames(self):
-        """
-        Estrae, converte e salva tutti i frame del video.
-
-        Utilizza un approccio parallelizzato per l'elaborazione dei frame
-        e mostra una barra di avanzamento.
-
-        Returns:
-            dict: Metadati del processo di precomputing
-        """
-        # Estrai informazioni video
-        video_info = self._extract_video_info()
-        if not video_info:
-            return None
-
-        self.logger.info(f"Avvio pre-elaborazione di {video_info['actual_frames']} frame...")
-
-        # Apri il video
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            self.logger.error(f"Impossibile aprire il video: {self.video_path}")
-            return None
-
-        # Prepara metadati
-        self.metadata = {
-            **video_info,
-            "frames_dir": self.output_dir,
-            "processed_frames": 0,
-            "completed": False,
-            "creation_time": time.time()
-        }
-
-        # Coda per l'elaborazione parallela
-        frame_queue = queue.Queue(maxsize=self.batch_size * 2)
-        result_queue = queue.Queue()
-
-        # Thread worker per la conversione: terminano solo alla sentinella None
-        def worker():
-            while True:
-                frame_data = frame_queue.get()
-                if frame_data is None:
-                    break
-
-                frame_index, frame = frame_data
-                try:
-                    ascii_frame = self._convert_frame_to_ascii(frame)
-
-                    # Salva il frame
-                    frame_file = os.path.join(self.output_dir, f"frame_{frame_index:06d}.txt")
-                    with open(frame_file, 'w', encoding='utf-8') as f:
-                        f.write(ascii_frame)
-
-                    result_queue.put(frame_index)
-                except Exception as e:
-                    self.logger.error(f"Errore nell'elaborazione del frame {frame_index}: {e}")
-                    result_queue.put(None)
-
-        # Avvia i worker threads
-        num_workers = min(os.cpu_count() or 1, 4)  # Limita il numero di thread
-        workers = []
-        for _ in range(num_workers):
-            t = threading.Thread(target=worker, daemon=True)
-            t.start()
-            workers.append(t)
-
-        try:
-            # Setup barra di progresso
-            with tqdm(total=video_info["actual_frames"], desc="Pre-elaborazione frame") as pbar:
-                from playback import FrameDecimator
-                decimator = FrameDecimator(video_info["original_fps"], self.target_fps)
-                frame_idx = 0
-                processed_count = 0
-                done_count = 0
-                failed_count = 0
-
-                # Loop principale di estrazione
-                while processed_count < video_info["actual_frames"] and cap.isOpened():
-                    # Leggi il frame
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-
-                    # Verifica se questo frame va tenuto per gli FPS effettivi
-                    if decimator.should_keep(frame_idx):
-                        # Aggiungi il frame alla coda
-                        frame_queue.put((processed_count, frame))
-                        processed_count += 1
-
-                    frame_idx += 1
-
-                    # Aggiorna la barra di progresso con i frame già elaborati
-                    while not result_queue.empty():
-                        done_count += 1
-                        failed_count += result_queue.get() is None
-                        pbar.update(1)
-
-                # Una sentinella per ogni worker, poi attesa di tutti i risultati
-                for _ in workers:
-                    frame_queue.put(None)
-                while done_count < processed_count:
-                    done_count += 1
-                    failed_count += result_queue.get() is None
-                    pbar.update(1)
-
-            for t in workers:
-                t.join()
-
-            if failed_count:
-                raise RuntimeError(f"{failed_count} frame non salvati")
-
-            # Aggiorna i metadati
-            self.metadata["processed_frames"] = processed_count
-            self.metadata["completed"] = True
-
-            # Salva i metadati
-            with open(self.cache_file, 'wb') as f:
-                pickle.dump(self.metadata, f)
-
-            self.logger.info(f"Pre-elaborazione completata: {processed_count} frame salvati in {self.output_dir}")
-            return self.metadata
-
-        except Exception as e:
-            self.logger.error(f"Errore durante la pre-elaborazione: {e}")
-            return None
-        finally:
-            cap.release()
-
-    def is_cache_valid(self):
-        """
-        Verifica se esiste una cache valida per questo video.
-
-        Returns:
-            bool: True se la cache è valida, False altrimenti
-        """
-        if not os.path.exists(self.cache_file):
-            return False
-
-        try:
-            with open(self.cache_file, 'rb') as f:
-                metadata = pickle.load(f)
-
-            # Verifica base: la cache è completa?
-            if not metadata.get("completed", False):
-                return False
-
-            # Verifica che i parametri corrispondano
-            if (metadata.get("video_path") != self.video_path or
-                    metadata.get("ascii_width") != self.width):
-                return False
-            if metadata.get("ascii_palette") != self.ascii_palette:
-                return False
-            if self.target_fps:
-                from playback import FrameDecimator
-                expected_fps = FrameDecimator(metadata.get("original_fps"), self.target_fps).effective_fps
-                if metadata.get("target_fps") != expected_fps:
-                    return False
-
-            # Verifica che esistano i file dei frame
-            frame_count = metadata.get("processed_frames", 0)
-            if frame_count <= 0:
-                return False
-
-            # Controlla che tutti i frame esistano
-            for idx in range(frame_count):
-                frame_file = os.path.join(self.output_dir, f"frame_{idx:06d}.txt")
-                if not os.path.exists(frame_file):
-                    return False
-
-            self.metadata = metadata
-            return True
-        except Exception:
-            return False
+    logger.info(f"Pre-elaborazione completata: {len(offsets) - 1} frame in {cache_dir}")
+    return cache_dir
 
 
-class PrecomputedFramePlayer:
+class CachedFrames:
     """
-    Classe per la riproduzione di frame ASCII precomputati.
-
-    Carica e visualizza i frame ASCII pre-elaborati dal disco
-    con sincronizzazione temporale precisa.
+    Accesso in sola lettura a una cache binaria tramite mmap.
 
     Attributes:
-        metadata (dict): Metadati dei frame precomputati
-        target_fps (float): FPS target per la riproduzione
-        loop_video (bool): Se True, riavvia il video quando raggiunge la fine
-        should_stop (threading.Event): Flag per la terminazione della riproduzione
-        current_frame (int): Indice del frame corrente
-        audio_player (AudioPlayer): Player per la riproduzione sincronizzata dell'audio
+        metadata (dict): Contenuto di metadata.json
     """
 
-    def __init__(self, metadata, target_fps=None, loop_video=True,
-                 enable_audio=False, log_fps=False):
-        """
-        Inizializza il player dei frame precomputati.
-
-        Args:
-            metadata (dict): Metadati della cache dei frame
-            target_fps (float, optional): FPS target per la riproduzione.
-                                         Se None, usa l'FPS dai metadati
-            loop_video (bool): Se True, riavvia il video quando raggiunge la fine
-            enable_audio (bool): Se True, riproduce l'audio del video
-            log_fps (bool): Se True, registra le statistiche sugli FPS
-        """
+    def __init__(self, cache_dir, metadata, offsets, file, mm):
+        self.cache_dir = cache_dir
         self.metadata = metadata
-        self.frames_dir = metadata["frames_dir"]
-        self.target_fps = target_fps or metadata["target_fps"]
-        self.total_frames = metadata["processed_frames"]
-        self.loop_video = loop_video
-        self.enable_audio = enable_audio
-        self.log_fps = log_fps
+        self._offsets = offsets
+        self._file = file
+        self._mm = mm
 
-        # Flag di controllo
-        self.should_stop = threading.Event()
-        self._stopped = False
-        self.current_frame = 0
-
-        # Inizializzazione audio se abilitato
-        self.audio_player = None
-        if enable_audio:
-            try:
-                from audio_player import AudioPlayer
-                self.audio_player = AudioPlayer(metadata["video_path"], self.target_fps)
-                self.video_duration = metadata["duration"]
-            except ImportError as e:
-                logging.error(f"Impossibile inizializzare l'audio: {e}")
-                self.enable_audio = False
-
-        # Statistiche FPS
-        self.frame_times = []
-        self.logger = logging.getLogger('PrecomputedFramePlayer')
-
-    def start(self):
-        """
-        Avvia la riproduzione dei frame precomputati.
-
-        Inizializza l'audio (se abilitato) e avvia il thread di riproduzione.
-
-        Returns:
-            bool: True se l'avvio è avvenuto con successo, False altrimenti
-        """
-        self.logger.info(f"Avvio riproduzione di {self.total_frames} frame precomputati")
-
-        # Inizializza audio
-        if self.enable_audio and self.audio_player:
-            if self.audio_player.initialize():
-                self.audio_player.start()
-                self.logger.info("Riproduzione audio avviata")
-            else:
-                self.logger.warning("Inizializzazione audio fallita")
-                self.enable_audio = False
-
-        # Avvia il thread di riproduzione
-        self.playback_thread = threading.Thread(
-            target=self._playback_thread_func,
-            daemon=True
-        )
-        self.playback_thread.start()
-        return True
-
-    def _playback_thread_func(self):
-        """
-        Thread principale di riproduzione dei frame.
-
-        Legge i frame precomputati dal disco e li visualizza
-        rispettando il timing e gestendo la sincronizzazione audio.
-        Visualizza anche statistiche di performance come un grafico
-        dei tempi di frame se richiesto.
-        """
-        import sys
-        import time
-
-        output_buffer = _OutputBuffer(sys.stdout)
-
-        # Sequenze ANSI
-        CURSOR_HOME = '\033[H'
-        CLEAR_SCREEN = '\033[2J'
-
-        # Colori ANSI
-        BOLD = '\033[1m'  # Testo in grassetto
-        RESET = '\033[0m'  # Reset stile
-        GREEN = '\033[32m'  # Testo verde
-        YELLOW = '\033[33m'  # Testo giallo
-        RED = '\033[31m'  # Testo rosso
-        BLUE = '\033[34m'  # Testo blu
-
-        # Statistiche FPS
-        last_frame_time = None
-        frame_times = []
-        recent_frame_times = []  # Per il grafico
-        from playback import PlaybackClock
-        clock = PlaybackClock(self.target_fps)  # Scadenze assolute di riproduzione
-        n = 0  # Contatore di riproduzione monotono (non si azzera al loop)
-        max_graph_points = 50  # Numero massimo di punti nel grafico
-        stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
-
-        def create_frame_time_graph(recent_times, width=30, target_fps=None):
-            """
-            Crea un grafico ASCII che mostra l'andamento dei tempi di frame.
-
-            Visualizza i tempi di rendering con gestione intelligente degli outlier
-            e colori per indicare le performance.
-
-            Args:
-                recent_times (list): Lista di tempi di frame in secondi
-                width (int): Larghezza massima del grafico
-                target_fps (float, optional): FPS target (se disponibile)
-
-            Returns:
-                str: Grafico ASCII dei tempi di frame
-            """
-            if not recent_times or len(recent_times) < 2:
-                return "Raccolta dati per il grafico..."
-
-            # Converti in millisecondi per leggibilità
-            times_ms = [t * 1000 for t in recent_times]
-
-            # Target time in ms
-            target_time_ms = (1000 / target_fps) if target_fps else None
-
-            # Valori min/max originali
-            original_min = min(times_ms)
-            original_max = max(times_ms)
-
-            # Rilevamento outlier con MAD
-            times_sorted = sorted(times_ms)
-            median = times_sorted[len(times_sorted) // 2]
-            mad = sum(abs(x - median) for x in times_ms) / len(times_ms)
-
-            # Outlier: valori che deviano più di 3.5 MAD
-            threshold = 3.5 * mad
-            outliers = [t for t in times_ms if abs(t - median) > threshold]
-            has_outliers = len(outliers) > 0
-
-            # Filtra outlier per visualizzazione
-            filtered_times = times_ms
-            if has_outliers:
-                filtered_times = [t for t in times_ms if abs(t - median) <= threshold]
-                if not filtered_times:
-                    filtered_times = times_sorted[:int(len(times_ms) * 0.8)]
-
-            # Calcola min/max per grafico filtrato
-            min_time = min(filtered_times)
-            max_time = max(filtered_times)
-
-            # Assicura intervallo minimo
-            range_time = max_time - min_time
-            if range_time < 0.5:
-                mid_value = (max_time + min_time) / 2
-                min_time = mid_value - 0.5
-                max_time = mid_value + 0.5
-
-            # Caratteri blocchi per grafico
-            block_chars = " ▁▂▃▄▅▆▇█"
-
-            # Intestazione
-            if has_outliers:
-                header = f"{BOLD}Frame Time (ms){RESET}: min={original_min:.1f} max={original_max:.1f}"
-                if target_time_ms:
-                    header += f" target={target_time_ms:.1f}"
-                header += f" {RED}[outliers rilevati]{RESET}"
-            else:
-                header = f"{BOLD}Frame Time (ms){RESET}: min={min_time:.1f} max={max_time:.1f}"
-                if target_time_ms:
-                    header += f" target={target_time_ms:.1f}"
-
-            # Limita punti dati alla larghezza
-            if len(times_ms) > width:
-                stride = len(times_ms) // width
-                samples = [times_ms[i] for i in range(0, len(times_ms), stride)][:width]
-            else:
-                samples = times_ms[-width:]
-
-            # Genera grafico a blocchi
-            graph_line = ""
-            for time_ms in samples:
-                # Verifica se outlier
-                is_outlier = abs(time_ms - median) > threshold
-
-                if is_outlier:
-                    # Outlier: blocchi rossi
-                    graph_line += f"{RED}█{RESET}"
-                else:
-                    # Normalizza valore
-                    normalized = max(0, min(1, (time_ms - min_time) / (max_time - min_time)))
-                    block_index = min(int(normalized * (len(block_chars) - 1)), len(block_chars) - 1)
-
-                    # Colore basato su target
-                    if target_time_ms is not None:
-                        if time_ms < target_time_ms * 0.85:  # Molto veloce
-                            color = BLUE
-                        elif time_ms < target_time_ms * 1.1:  # Vicino al target
-                            color = GREEN
-                        elif time_ms < target_time_ms * 1.5:  # Leggermente lento
-                            color = YELLOW
-                        else:  # Molto lento
-                            color = RED
-                    else:
-                        color = GREEN
-
-                    # Blocco colorato
-                    graph_line += f"{color}{block_chars[block_index]}{RESET}"
-
-            # Etichette asse
-            if min_time < 10:
-                min_label = f"{min_time:.1f}ms"
-            else:
-                min_label = f"{min_time:.0f}ms"
-
-            if max_time < 10:
-                max_label = f"{max_time:.1f}ms"
-            else:
-                max_label = f"{max_time:.0f}ms"
-
-            # Allinea etichette
-            spaces = width - len(min_label) - len(max_label)
-            if spaces < 1:
-                spaces = 1
-
-            # Scala in basso
-            scale = f"{min_label}{' ' * spaces}{max_label}"
-
-            # Info outlier
-            if has_outliers and original_max > max_time:
-                scale += f" [{RED}max: {original_max:.1f}ms{RESET}]"
-
-            # Grafico completo
-            return f"{header}\n{graph_line}\n{scale}"
-
-        def create_fps_stats(frame_times, target_fps=None):
-            """
-            Genera statistiche FPS formattate per la visualizzazione.
-
-            Args:
-                frame_times (list): Lista dei tempi di frame
-                target_fps (float, optional): FPS target (se disponibile)
-
-            Returns:
-                str: Stringa formattata con statistiche FPS
-            """
-            if not frame_times:
-                return "Calcolando FPS..."
-
-            # Calcola FPS dalle ultime misurazioni
-            recent_times = frame_times[-10:]  # Ultimi 10 frame
-            avg_time = sum(recent_times) / len(recent_times)
-            current_fps = 1.0 / avg_time
-
-            # Calcola deviazione standard per stabilità
-            if len(recent_times) > 1:
-                variance = sum((t - avg_time) ** 2 for t in recent_times) / len(recent_times)
-                std_dev = variance ** 0.5
-                stability = 1 - min(1, (std_dev / avg_time))  # 0=instabile, 1=stabile
-            else:
-                stability = 1
-
-            # Colore in base al target
-            if target_fps:
-                fps_ratio = current_fps / target_fps
-                if fps_ratio > 0.95 and fps_ratio < 1.05:  # Entro 5% del target
-                    fps_color = GREEN
-                elif fps_ratio > 0.8:  # Almeno 80% del target
-                    fps_color = YELLOW
-                else:
-                    fps_color = RED
-            else:
-                fps_color = GREEN
-
-            # Barra stabilità
-            stability_bar_length = int(stability * 10)
-            stability_bar = f"[{'|' * stability_bar_length}{' ' * (10 - stability_bar_length)}]"
-
-            # Statistiche formattate
-            stats = (
-                f"{BOLD}FPS: {fps_color}{current_fps:.1f}{RESET} "
-                f"| Stabilità: {stability_bar} "
-            )
-
-            if target_fps:
-                stats += f"| Target: {target_fps} FPS "
-                stats += f"| Ratio: {current_fps / target_fps:.2f} "
-
-            stats += f"| Frame {self.current_frame}/{self.total_frames}"
-
-            return stats
-
+    @classmethod
+    def open(cls, cache_dir) -> "CachedFrames | None":
+        """Apre la cache; None se manca metadata.json o la cache è incompleta."""
+        metadata_path = os.path.join(cache_dir, METADATA_FILE)
+        if not os.path.isfile(metadata_path):
+            return None
         try:
-            # Pulisci lo schermo all'inizio
-            output_buffer.write(CLEAR_SCREEN)
-            output_buffer.flush()
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            offsets = [int(o) for o in np.load(os.path.join(cache_dir, INDEX_FILE))]
+            file = open(os.path.join(cache_dir, FRAMES_FILE), "rb")
+        except (OSError, ValueError) as e:
+            logger.warning(f"Cache non valida in {cache_dir}: {e}")
+            return None
+        try:
+            if len(offsets) < 2 or len(offsets) - 1 != metadata.get("frames"):
+                raise ValueError("indice e metadati non coerenti")
+            mm = mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ)
+            if len(mm) != offsets[-1]:
+                mm.close()
+                raise ValueError("dimensione di frames.bin non coerente con l'indice")
+        except (OSError, ValueError) as e:
+            file.close()
+            logger.warning(f"Cache non valida in {cache_dir}: {e}")
+            return None
+        return cls(cache_dir, metadata, offsets, file, mm)
 
-            # Loop di riproduzione
-            while not self.should_stop.is_set():
-                # Carica il frame corrente
-                frame_file = os.path.join(self.frames_dir, f"frame_{self.current_frame:06d}.txt")
+    def __len__(self):
+        return len(self._offsets) - 1
 
-                try:
-                    with open(frame_file, 'r', encoding='utf-8') as f:
-                        ascii_frame = f.read()
-                except FileNotFoundError:
-                    self.logger.warning(f"Frame {self.current_frame} non trovato: {frame_file}")
-                    # Passa al frame successivo
-                    self.current_frame = (self.current_frame + 1) % self.total_frames
-                    if self.current_frame == 0 and not self.loop_video:
-                        break
-                    continue
+    def frame(self, i) -> bytes:
+        """Restituisce i bytes del frame i."""
+        return self._mm[self._offsets[i]:self._offsets[i + 1]]
 
-                # Sincronizzazione audio
-                if self.enable_audio and self.audio_player:
-                    video_time = (self.current_frame / self.total_frames) * self.video_duration
-                    self.audio_player.update_video_time(video_time)
+    def close(self):
+        """Chiude mmap e file (necessario su Windows per poter cancellare la cache)."""
+        if self._mm is not None:
+            self._mm.close()
+            self._mm = None
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
-                # Attesa fino alla scadenza assoluta del frame (nessuna deriva)
-                clock.wait_for(n)
-                n += 1
 
-                # Rendering frame
-                output_buffer.write(CURSOR_HOME)
-                output_buffer.write(ascii_frame)
+class CachedFrameSource:
+    """FrameSource che legge i frame in ordine da una CachedFrames."""
 
-                # Calcola tempo corrente
-                current_time = time.perf_counter()
+    def __init__(self, cached: CachedFrames):
+        self.cached = cached
+        self._next = 0
 
-                # Calcola e registra il frame time se non è il primo frame
-                if last_frame_time is not None:
-                    frame_interval = current_time - last_frame_time
-                    frame_times.append(frame_interval)
-                    if len(frame_times) > 100:
-                        frame_times.pop(0)
+    def next_frame(self):
+        """Restituisce (indice, frame) oppure None a fine cache."""
+        if self._next >= len(self.cached):
+            return None
+        i = self._next
+        self._next += 1
+        return i, self.cached.frame(i)
 
-                    # Aggiorna buffer grafico
-                    recent_frame_times.append(frame_interval)
-                    if len(recent_frame_times) > max_graph_points:
-                        recent_frame_times.pop(0)
-
-                # Aggiungi statistiche FPS e grafico se richiesto
-                if self.log_fps and self.current_frame % stats_update_interval == 0:
-                    fps_stats = ""
-                    if frame_times:
-                        # Statistiche FPS
-                        fps_stats = create_fps_stats(frame_times, self.target_fps)
-
-                        # Grafico tempi frame
-                        frame_time_graph = create_frame_time_graph(
-                            recent_frame_times,
-                            width=50,
-                            target_fps=self.target_fps
-                        )
-
-                        # Visualizzazione completa
-                        # Ogni riga termina con \033[K per cancellare i residui del frame precedente
-                        fps_display = "\033[K\n\033[K\n" + f"{fps_stats}\n{frame_time_graph}".replace(
-                            "\n", "\033[K\n") + "\033[K"
-                        output_buffer.write(fps_display)
-
-                output_buffer.flush()
-
-                # Aggiorna timestamp per statistiche
-                last_frame_time = current_time
-
-                # Passa al frame successivo
-                self.current_frame += 1
-                if self.current_frame >= self.total_frames:
-                    if not self.loop_video:
-                        break
-                    self.current_frame = 0
-
-            # Alla fine, salva le statistiche FPS
-            self.frame_times = frame_times
-
-        except Exception as e:
-            self.logger.error(f"Errore durante la riproduzione: {e}")
-        finally:
-            # Segnala la fine al main loop (necessario con --no-loop)
-            self.should_stop.set()
-            self.logger.info("Thread di riproduzione terminato")
-
-    def stop(self):
-        """
-        Ferma la riproduzione e rilascia le risorse.
-
-        Implementa una chiusura pulita di tutti i componenti del player.
-        """
-        if self._stopped:
-            return
-        self._stopped = True
-        self.logger.info("Arresto riproduzione")
-
-        # Imposta flag di terminazione
-        self.should_stop.set()
-
-        # Ferma l'audio
-        if self.enable_audio and hasattr(self, 'audio_player') and self.audio_player:
-            try:
-                self.audio_player.stop()
-            except Exception as e:
-                self.logger.error(f"Errore durante l'arresto dell'audio: {e}")
-
-        # Attendi la terminazione del thread
-        if hasattr(self, 'playback_thread') and self.playback_thread:
-            self.playback_thread.join(timeout=0.5)
-
-        # Stampa statistiche FPS
-        if self.log_fps and self.frame_times:
-            avg_time = sum(self.frame_times) / len(self.frame_times)
-            avg_fps = 1.0 / avg_time if avg_time > 0 else 0
-            self.logger.info(f"FPS medio: {avg_fps:.2f}")
-
-        # Mostra il cursore
-        sys.stdout.write('\033[?25h')
-        sys.stdout.flush()
+    def restart(self):
+        """Riparte dal primo frame."""
+        self._next = 0

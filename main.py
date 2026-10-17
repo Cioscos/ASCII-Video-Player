@@ -1,10 +1,11 @@
 import argparse
 import logging
 import sys
-import time
+import threading
 import os
 import cv2
 
+from ascii_converter import compute_ascii_height
 from calibration_frame import render_calibration_frame
 from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
@@ -105,7 +106,7 @@ def setup_environment(args):
     has_high_performance = False
     if args.high_performance:
         try:
-            from precomputer import FramePrecomputer, PrecomputedFramePlayer
+            import precomputer  # richiede tqdm
             has_high_performance = True
         except ImportError as e:
             print(f"Impossibile utilizzare modalità high-performance: {e}")
@@ -204,7 +205,11 @@ def get_ascii_palette(args, logger):
 
 def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette, logger):
     """
-    Esegue il video in modalità high-performance.
+    Esegue il video in modalità high-performance: cache binaria pre-elaborata letta via mmap.
+
+    Se la cache valida non esiste viene creata con precompute; in caso di errore
+    (o video non leggibile) si ripiega sulla modalità standard. Ctrl+C durante la
+    pre-elaborazione termina senza fallback.
 
     Args:
         args (argparse.Namespace): Gli argomenti parsati
@@ -216,73 +221,74 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
     Returns:
         int: Codice di uscita (0 per successo, altro valore per errore)
     """
-    from precomputer import FramePrecomputer, PrecomputedFramePlayer
+    from fps_stats import FpsStats
+    from playback import FrameDecimator, run_playback
+    from precomputer import CachedFrames, CachedFrameSource, cache_dir_for, precompute
+    from terminal_display import TerminalDisplay
 
     width, height = ascii_dimensions
-    logger.info("Modalità high-performance attivata: pre-elaborazione frame")
+    source_fps = video_info[1]
+    display = TerminalDisplay()
+    logger.info("Modalità high-performance attivata")
 
-    # Inizializza precomputer
-    precomputer = FramePrecomputer(
-        args.video_path,
-        width,
-        args.fps,
-        ascii_palette,
-        batch_size=args.batch_size
-    )
-
-    # Verifica cache esistente
-    if not precomputer.is_cache_valid():
+    effective_fps = FrameDecimator(source_fps, args.fps).effective_fps
+    cache_dir = cache_dir_for(args.video_path, width, height, effective_fps, ascii_palette)
+    cached = CachedFrames.open(cache_dir)
+    if cached is not None:
+        logger.info(f"Cache esistente riutilizzata: {cache_dir}")
+        print("\nUtilizzo cache esistente in modalità high-performance")
+    else:
         print("\nPreparazione video in modalità high-performance...")
         print("Questo processo potrebbe richiedere tempo ma migliorerà le performance.")
-        metadata = precomputer.precompute_frames()
-        if not metadata:
-            logger.error("Pre-elaborazione fallita, utilizzo pipeline standard")
+        sys.stdout.flush()
+        try:
+            cache_dir = precompute(args.video_path, width, height, source_fps, args.fps, ascii_palette)
+        except KeyboardInterrupt:
+            logger.info("Pre-elaborazione interrotta da tastiera")
+            display.restore()
+            return 0
+        except Exception as e:
+            logger.exception(f"Pre-elaborazione fallita: {e}. Utilizzo modalità standard")
             return run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
-    else:
-        print("\nUtilizzo cache esistente in modalità high-performance")
-        metadata = precomputer.metadata
+        cached = CachedFrames.open(cache_dir) if cache_dir is not None else None
+        if cached is None:
+            logger.error("Pre-elaborazione non riuscita, utilizzo modalità standard")
+            return run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
 
-    # Inizializza player
-    player = PrecomputedFramePlayer(
-        metadata,
-        metadata["target_fps"],
-        not args.no_loop,
-        args.audio,
-        args.log_fps
-    )
-
-    # Nascondi cursore
-    sys.stdout.write(HIDE_CURSOR)
-    sys.stdout.flush()
+    fps = cached.metadata["effective_fps"]
+    stats = FpsStats(fps) if args.log_fps else None
+    audio = None
+    exit_code = 0
 
     try:
-        # Avvia player
-        player.start()
-
-        # Mostra istruzioni
         print("\nASCII Video Player avviato in modalità high-performance!")
         print("Premi Ctrl+C per terminare\n")
         if not args.no_loop:
             print("Il video si ripeterà automaticamente alla fine")
         else:
             print("Il video terminerà automaticamente alla fine")
-        if args.audio:
-            print("Audio abilitato")
-
-        # Attendi termine
-        while not player.should_stop.is_set():
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Interruzione da tastiera")
-    finally:
-        # Ferma player
-        player.stop()
-
-        # Mostra cursore
-        sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
 
-    return 0
+        if args.audio:
+            audio = _start_audio(args.video_path, fps, logger)
+
+        drawn = run_playback(CachedFrameSource(cached), fps, display, threading.Event(),
+                             loop=not args.no_loop, stats=stats, audio=audio)
+        logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
+    except KeyboardInterrupt:
+        logger.info("Interruzione da tastiera")
+    except Exception as e:
+        logger.exception(f"Errore durante la riproduzione: {e}")
+        exit_code = 1
+    finally:
+        if audio is not None:
+            audio.stop()
+        display.restore()
+        cached.close()
+
+    if stats is not None:
+        logger.info(stats.summary())
+    return exit_code
 
 
 def _start_audio(video_path, fps, logger):
@@ -395,13 +401,10 @@ def main():
     logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
 
     width = args.width
-    height, width_frame = frame.shape[:2]
-    aspect_ratio = height / width_frame
-    char_aspect_correction = 2.25  # Fattore di correzione per i caratteri ASCII
-    new_height = int(aspect_ratio * width / char_aspect_correction)
+    src_h, src_w = frame.shape[:2]
+    new_height = compute_ascii_height(src_w, src_h, width)
 
-    logger.info(
-        f"Dimensioni output ASCII: {width}x{new_height} (aspect ratio video: {aspect_ratio:.2f}, corretta: {aspect_ratio / char_aspect_correction:.2f})")
+    logger.info(f"Dimensioni output ASCII: {width}x{new_height} (aspect ratio video: {src_h / src_w:.2f})")
 
     # Mostra frame di calibrazione
     try:

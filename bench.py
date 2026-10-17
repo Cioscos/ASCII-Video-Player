@@ -36,35 +36,34 @@ def _load_frames(video, width, max_frames):
 
 
 def _make_converter(width, palette, src_size):
-    """Usa ascii_converter se importabile, altrimenti il convertitore legacy."""
-    try:
-        from ascii_converter import AsciiConverter, compute_ascii_height
-        conv = AsciiConverter(width, compute_ascii_height(src_size[1], src_size[0], width), palette)
-        return conv.convert_frame
-    except ImportError:
-        from precomputer import FramePrecomputer
-        pre = FramePrecomputer.__new__(FramePrecomputer)
-        pre.width, pre.ascii_palette = width, palette
-        return pre._convert_frame_to_box_ascii if palette == "box" else pre._convert_frame_to_ascii
+    """Restituisce la funzione di conversione di ascii_converter per il frame sorgente dato."""
+    from ascii_converter import AsciiConverter, compute_ascii_height
+    conv = AsciiConverter(width, compute_ascii_height(src_size[1], src_size[0], width), palette)
+    return conv.convert_frame
 
 
 def _bench_precompute(video, width, palette, max_frames):
-    """Precompute legacy limitato a N frame, con output in una directory temporanea."""
-    from precomputer import FramePrecomputer
+    """Precompute limitato a N frame (fps sorgente), con cache in una directory temporanea."""
+    from ascii_converter import compute_ascii_height
+    from precomputer import CachedFrames, precompute
 
-    class LimitedPrecomputer(FramePrecomputer):
-        def _extract_video_info(self):
-            info = super()._extract_video_info()
-            if info:
-                info["actual_frames"] = min(info["actual_frames"], max_frames)
-            return info
+    cap = cv2.VideoCapture(video)
+    source_fps = cap.get(cv2.CAP_PROP_FPS)
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    height = compute_ascii_height(src_w, src_h, width)
 
     with tempfile.TemporaryDirectory() as tmp:
-        pre = LimitedPrecomputer(video, width, ascii_palette=palette, output_dir=tmp)
         t0 = time.perf_counter()
-        pre.precompute_frames()
+        cache_dir = precompute(video, width, height, source_fps, None, palette, cache_root=tmp,
+                               max_frames=max_frames)
         elapsed = time.perf_counter() - t0
-        n = pre.metadata.get("processed_frames", max_frames)
+        if cache_dir is None:
+            return 0.0
+        cached = CachedFrames.open(cache_dir)
+        n = len(cached)
+        cached.close()
     return n / elapsed if elapsed > 0 else 0.0
 
 
