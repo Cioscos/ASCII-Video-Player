@@ -53,8 +53,17 @@ def cache_dir_for(video_path, width, height, effective_fps, palette, cache_root=
 
 
 def _init_worker(width, height, palette):
-    """Inizializzatore del pool: crea il convertitore del processo worker."""
+    """
+    Inizializzatore del pool: crea il convertitore del processo worker.
+
+    Il worker ignora SIGINT: Ctrl+C arriva a tutti i processi della console, ma
+    deve gestirlo solo il processo principale (Pool.__exit__ -> terminate() chiude
+    i worker). Altrimenti ogni worker morirebbe con un traceback e imap potrebbe
+    restare in attesa di un risultato perso.
+    """
     global _worker_converter
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     from ascii_converter import AsciiConverter
     _worker_converter = AsciiConverter(width, height, palette)
 
@@ -144,6 +153,8 @@ def precompute(video_path, width, height, source_fps, target_fps, palette, cache
 
             if processes > 0:
                 from multiprocessing import Pool
+                # frames_iter (decodifica con cap) viene consumato dal thread task-handler del Pool:
+                # l'uscita dal with (terminate) deve avvenire prima di cap.release(), non riordinare.
                 with Pool(processes, initializer=_init_worker, initargs=(width, height, palette)) as pool:
                     for data in pool.imap(_convert_worker, frames_iter, chunksize=8):
                         write(data)

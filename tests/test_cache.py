@@ -1,11 +1,13 @@
 import os
+import signal
+from multiprocessing import Pool
 
 import cv2
 import pytest
 
 from ascii_converter import AsciiConverter
 from playback import FrameDecimator
-from precomputer import CachedFrames, CachedFrameSource, cache_dir_for, precompute
+from precomputer import CachedFrames, CachedFrameSource, _init_worker, cache_dir_for, precompute
 
 
 def nth_kept_frame(video, n):
@@ -124,3 +126,9 @@ def test_source_iterates_and_restarts(tiny_video, tmp_path):
 
 def test_open_missing_metadata_returns_none(tmp_path):
     assert CachedFrames.open(str(tmp_path / "inesistente")) is None
+
+
+def test_pool_worker_ignores_sigint():
+    # Ctrl+C va gestito solo dal processo principale (terminate del Pool)
+    with Pool(1, initializer=_init_worker, initargs=(8, 4, " .:@")) as pool:
+        assert pool.apply(signal.getsignal, (signal.SIGINT,)) == signal.SIG_IGN
