@@ -1,6 +1,11 @@
 """Logica di riproduzione condivisa tra le modalità (senza dipendenze pesanti)."""
+import logging
 import math
+import threading
 import time
+from typing import Optional, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class FrameDecimator:
@@ -57,6 +62,10 @@ class PlaybackClock:
         self._sleep = sleep
         self.t0 = None
 
+    def now(self):
+        """Istante corrente secondo la sorgente del tempo dell'orologio."""
+        return self._now()
+
     def start(self):
         """Ancora l'istante di partenza."""
         self.t0 = self._now()
@@ -80,3 +89,77 @@ class PlaybackClock:
     def rebase(self, n):
         """Riancora l'orologio in modo che il frame n sia in scadenza adesso."""
         self.t0 = self._now() - n / self.fps
+
+
+class FrameSource(Protocol):
+    """Sorgente di frame già convertiti, letta dal thread principale."""
+
+    def next_frame(self) -> Optional[tuple]:
+        """Restituisce (indice, frame in bytes) oppure None a fine video."""
+        ...
+
+    def restart(self) -> None:
+        """Riporta la sorgente al primo frame (per il loop)."""
+        ...
+
+
+def run_playback(source, fps, display, should_stop: threading.Event, loop,
+                 stats=None, audio=None, clock: Optional[PlaybackClock] = None) -> int:
+    """
+    Loop di riproduzione comune a entrambe le modalità.
+
+    Il contatore `n` del clock avanza per ogni frame estratto (disegnato o
+    saltato). I frame in ritardo di almeno un frame (ma meno di 1 s) vengono
+    saltati; con ritardo >= 1 s (stallo) l'orologio viene riancorato.
+
+    Returns:
+        int: numero di frame disegnati
+    """
+    if clock is None:
+        clock = PlaybackClock(fps)
+    if clock.t0 is None:
+        clock.start()
+    frame_time = 1.0 / fps
+    n = 0
+    drawn = 0
+    last_draw = None
+    got_frame = False  # almeno un frame ottenuto dall'ultimo avvio/restart
+
+    while not should_stop.is_set():
+        item = source.next_frame()
+        if item is None:
+            if not loop or not got_frame:
+                break  # fine video, oppure sorgente vuota dopo il restart
+            source.restart()
+            got_frame = False
+            continue
+        got_frame = True
+        index, frame = item
+
+        late = clock.lateness(n)
+        if late >= 1.0:
+            clock.rebase(n)
+            logger.debug("Stallo di %.2fs: orologio riancorato al frame %d", late, n)
+        elif late > frame_time:
+            logger.debug("Frame %d saltato (ritardo %.3fs)", index, late)
+            n += 1
+            continue
+        else:
+            clock.wait_for(n)
+        n += 1
+
+        if audio is not None:
+            audio.update_video_time(index / fps)
+
+        overlay = None
+        if stats is not None and drawn % 5 == 0:
+            overlay = stats.overlay_lines(f"Frame {index}")
+        display.show(frame, overlay)
+        drawn += 1
+
+        now = clock.now()
+        if stats is not None and last_draw is not None:
+            stats.record(now - last_draw)
+        last_draw = now
+
+    return drawn
