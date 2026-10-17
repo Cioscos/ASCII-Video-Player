@@ -66,3 +66,22 @@ def test_make_converter_default_is_ascii_converter():
 def test_reference_cells_agrees_with_legacy_reference(random_frame):
     legacy = reference_grid(random_frame, 120, EXTENDED)
     assert [[(c, f) for c, f, _ in row] for row in reference_cells(random_frame, 120, EXTENDED)] == legacy
+
+
+@pytest.mark.parametrize("palette", [" .:-=+*#%@", EXTENDED, "box", "half", "░▒▓█"])
+def test_truecolor_matches_reference(random_frame, palette):
+    h = compute_ascii_height(160, 90, 120)
+    out = make_converter(120, h, palette, truecolor=True).convert_frame(random_frame)
+    assert parse_ansi_cells(out) == reference_cells(random_frame, 120, palette, truecolor=True)
+
+
+def test_truecolor_run_length():
+    f = np.full((3, 40, 3), 77, np.uint8)
+    assert make_converter(40, 3, "@", truecolor=True).convert(f).count(b"\033[38;2;77;77;77m") == 3
+
+
+def test_truecolor_half_sequence_format():
+    f = np.zeros((2, 1, 3), np.uint8)
+    f[0] = (3, 2, 1)
+    f[1] = (6, 5, 4)  # BGR
+    assert make_converter(1, 1, "half", truecolor=True).convert(f) == "\033[38;2;1;2;3;48;2;4;5;6m▀\033[0m".encode()
