@@ -30,7 +30,12 @@ def decode_keys(chars: str, windows: bool) -> list[str]:
         if windows and c in _WIN_PREFIXES:
             if i + 1 < n and chars[i + 1] in _WIN_ARROWS:
                 keys.append(_WIN_ARROWS[chars[i + 1]])
-            i += 2
+                i += 2
+            elif c == "\x00":
+                i += 2  # tasto speciale sconosciuto: scarta prefisso e codice
+            else:
+                keys.append(c)  # \xe0 da solo e' la lettera "\u00e0"
+                i += 1
         elif not windows and c == "\x1b" and i + 1 < n and chars[i + 1] in "[O":
             # Sequenza CSI/SS3: parametri, poi un byte finale (0x40-0x7e)
             j = i + 2
@@ -90,7 +95,7 @@ class KeyReader:
         while msvcrt.kbhit():
             c = msvcrt.getwch()
             chars += c
-            if c in _WIN_PREFIXES:
+            if c in _WIN_PREFIXES and msvcrt.kbhit():
                 chars += msvcrt.getwch()
         return chars
 

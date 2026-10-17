@@ -31,3 +31,29 @@ def test_inactive_without_isatty():
         pass
     with KeyReader(Senza()) as k:
         assert not k.active and k.poll() is None
+
+
+def test_windows_a_grave_literal():
+    assert decode_keys("\xe0", windows=True) == ["\xe0"]
+    assert decode_keys("\xe0q", windows=True) == ["\xe0", "q"]
+    assert decode_keys("\xe0H", windows=True) == ["up"]
+
+
+def _reader_attivo(monkeypatch, blocchi):
+    k = KeyReader(io.StringIO())
+    k.active = True
+    k._windows = True
+    it = iter(blocchi)
+    monkeypatch.setattr(k, "_read_raw_windows", lambda: next(it, ""))
+    return k
+
+
+def test_poll_returns_queued_keys_one_at_a_time(monkeypatch):
+    k = _reader_attivo(monkeypatch, ["ab"])
+    assert [k.poll(), k.poll(), k.poll()] == ["a", "b", None]
+
+
+def test_read_returns_key_and_times_out(monkeypatch):
+    k = _reader_attivo(monkeypatch, ["", "", "x"])
+    assert k.read(1.0) == "x"
+    assert k.read(0.05) is None
