@@ -35,11 +35,11 @@ def _load_frames(video, width, max_frames):
     return frames, elapsed
 
 
-def _make_converter(width, palette):
+def _make_converter(width, palette, src_size):
     """Usa ascii_converter se importabile, altrimenti il convertitore legacy."""
     try:
-        from ascii_converter import AsciiConverter
-        conv = AsciiConverter(width, palette)
+        from ascii_converter import AsciiConverter, compute_ascii_height
+        conv = AsciiConverter(width, compute_ascii_height(src_size[1], src_size[0], width), palette)
         return conv.convert_frame
     except ImportError:
         from precomputer import FramePrecomputer
@@ -81,7 +81,7 @@ def main():
     if not frames:
         raise SystemExit("Nessun frame decodificato")
 
-    convert = _make_converter(args.width, palette)
+    convert = _make_converter(args.width, palette, frames[0].shape[:2])
     t0 = time.perf_counter()
     outputs = [convert(f) for f in frames]
     convert_s = time.perf_counter() - t0
