@@ -45,7 +45,7 @@ class TerminalDisplay:
                 start = r
                 while r < n and rows[r] != old[r]:
                     r += 1
-                parts.append(b"\033[%d;1H" % (start + 1) + b"\033[K\n".join(rows[start:r]) + b"\033[K")
+                parts.append(b"\033[%d;1H" % (start + 1) + b"\n".join(rows[start:r]))
         self._rows = rows
 
         if overlay_changed:

@@ -40,6 +40,7 @@ def test_identical_frame_writes_almost_nothing():
     n = len(buf.getvalue())
     d.show(f)
     assert len(buf.getvalue()) - n < 16
+    assert len(buf.getvalue()) == n  # per design: nessuna scrittura
 
 
 def test_overlay_lines_cleared():
@@ -96,3 +97,35 @@ def test_restore_shows_cursor():
     buf = io.BytesIO()
     TerminalDisplay(buf).restore()
     assert buf.getvalue().endswith(b"\033[0m\033[?25h")
+
+
+def _variant(base: bytes, changed: set) -> bytes:
+    """Sostituisce le righe indicate con righe di pari larghezza prese da un altro seed."""
+    rows = base.split(b"\n")
+    other = make_frame(99).split(b"\n")
+    for r in changed:
+        rows[r] = other[r]
+    return b"\n".join(rows)
+
+
+def test_delta_multi_row_runs_and_edges():
+    base = make_frame(0)
+    frames = [
+        base,
+        _variant(base, set(range(3, 9))),  # run di 6 righe adiacenti
+        _variant(base, {0, N_ROWS - 1}),  # prima e ultima riga
+        _variant(base, {0, 1, 2, N_ROWS - 2, N_ROWS - 1}),
+        base,  # ritorno a righe invariate
+        base,
+    ]
+    buf = io.BytesIO()
+    d = TerminalDisplay(buf)
+    vt = VirtualTerminal()
+    for f in frames:
+        d.show(f)
+        vt.feed(buf.getvalue())
+        buf.seek(0)
+        buf.truncate()
+        full = VirtualTerminal()
+        full.feed(b"\033[2J\033[H" + f)
+        assert vt.screen() == full.screen()
