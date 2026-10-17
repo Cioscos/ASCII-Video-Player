@@ -6,7 +6,7 @@ import threading
 
 import cv2
 
-from ascii_converter import compute_ascii_height
+from ascii_converter import auto_width, compute_ascii_height
 from calibration_frame import render_calibration_frame
 from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
@@ -61,7 +61,8 @@ def parse_arguments():
         description="Real-time ASCII video using a parallel pipeline with separate conversion and rendering."
     )
     parser.add_argument("video_path", type=str, help="Path to the video file")
-    parser.add_argument("width", type=int, help="Width of the ASCII output")
+    parser.add_argument("width", type=int, nargs='?', default=None,
+                        help="Larghezza dell'output ASCII (automatica se omessa)")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second for extraction (default: 10)")
     parser.add_argument("--log_fps", action="store_true", help="Enable logging of display FPS")
     parser.add_argument("--log_performance", action="store_true",
@@ -321,6 +322,11 @@ def _shutdown(display, logger, *cleanups):
             logger.info("Interruzione da tastiera durante la chiusura, proseguo")
 
 
+def reserved_rows(log_fps: bool) -> int:
+    """Righe del terminale riservate al di fuori del frame (6 con --log_fps, 2 senza)."""
+    return 6 if log_fps else 2
+
+
 def warn_if_frame_too_tall(height, logger):
     """
     Avvisa se il frame ASCII (più una riga) non entra nell'altezza del terminale.
@@ -447,8 +453,12 @@ def main():
     term_width, term_height = get_terminal_size()
     logger.info(f"Dimensioni terminale: {term_width}x{term_height}")
 
-    width = args.width
     src_h, src_w = frame.shape[:2]
+    if args.width is None:
+        width = auto_width(src_w, src_h, term_width, term_height, reserved_rows(args.log_fps))
+        logger.info(f"Larghezza automatica scelta: {width}")
+    else:
+        width = args.width
     new_height = compute_ascii_height(src_w, src_h, width)
 
     logger.info(f"Dimensioni output ASCII: {width}x{new_height} (aspect ratio video: {src_h / src_w:.2f})")

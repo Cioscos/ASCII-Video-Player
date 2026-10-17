@@ -13,6 +13,18 @@ def compute_ascii_height(src_w: int, src_h: int, width: int) -> int:
     return max(1, int(src_h / src_w * width / CHAR_ASPECT_CORRECTION))
 
 
+def auto_width(src_w: int, src_h: int, term_cols: int, term_rows: int, reserved_rows: int) -> int:
+    """Larghezza massima che entra nel terminale (colonne e righe) senza superare la sorgente (minimo 1)."""
+    lo, hi = 1, max(1, min(term_cols, src_w))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if compute_ascii_height(src_w, src_h, mid) + reserved_rows <= term_rows:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 class AsciiConverter:
     """Converte frame BGR in byte UTF-8 con sequenze ANSI; il colore e' emesso solo al cambio."""
 
