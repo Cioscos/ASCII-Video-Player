@@ -3,7 +3,7 @@ import os
 import sys
 
 import main
-from menu import (PALETTE_CHOICES, MenuState, Settings, list_videos, load_settings, render_menu,
+from menu import (HINTS, PALETTE_CHOICES, MenuState, Settings, list_videos, load_settings, render_menu,
                   save_settings)
 
 
@@ -65,6 +65,13 @@ def test_load_corrupted_settings(tmp_path):
 def test_load_settings_with_wrong_types(tmp_path):
     p = tmp_path / "settings.json"
     p.write_text(json.dumps({"fps": "tanti", "palette": "boh"}), encoding="utf-8")
+    s, msg = load_settings(str(p))
+    assert s == Settings() and msg
+
+
+def test_load_settings_with_int_cache_limit(tmp_path):
+    p = tmp_path / "settings.json"
+    p.write_text(json.dumps({"cache_limit": 5}), encoding="utf-8")
     s, msg = load_settings(str(p))
     assert s == Settings() and msg
 
@@ -196,6 +203,12 @@ def test_edit_invalid_number_keeps_editing(tmp_path):
     assert st.screen == "settings" and st.settings.fps == 10
 
 
+def test_edit_width_rejects_non_ascii_digits(tmp_path):
+    st = settings_state(tmp_path)
+    press(st, "enter", "²", "enter")
+    assert st.screen == "edit" and st.message and st.settings.width is None
+
+
 def test_edit_cache_limit_and_custom_path(tmp_path):
     st = settings_state(tmp_path)
     for _ in range(9):
@@ -259,6 +272,7 @@ def test_render_fits_and_scrolls():
     lines = screen.split("\n")
     assert len(lines) <= 10 and all(len(line) <= 20 for line in lines)
     assert any(line.startswith("> ") and "v40.mp4" in line for line in lines)
+    assert lines[-1] == HINTS["video"][:20]
 
 
 def test_esc_on_main_quits():

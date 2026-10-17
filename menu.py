@@ -91,6 +91,8 @@ def _is_int(value) -> bool:
 
 
 def _valid_settings(s: Settings) -> bool:
+    if not isinstance(s.cache_limit, str):
+        return False
     try:
         parse_size(s.cache_limit)
     except (ValueError, TypeError):
@@ -305,7 +307,7 @@ class MenuState:
         if field in ("width", "fps"):
             if field == "width" and not text:
                 value = None
-            elif text.isdigit() and int(text) > 0:
+            elif text.isascii() and text.isdigit() and int(text) > 0:
                 value = int(text)
             else:
                 self.message = "Inserisci un numero intero maggiore di 0"
@@ -348,9 +350,9 @@ def _format_setting(settings: Settings, name: str) -> str:
         return value or "(nessuno)"
     if name == "cache_limit":
         try:
-            return "nessun limite" if parse_size(value) == 0 else value
+            return "nessun limite" if parse_size(value) == 0 else str(value)
         except ValueError:
-            return value
+            return str(value)
     return str(value)
 
 
