@@ -205,7 +205,7 @@ class _KeyHandler:
             if key == "space":
                 break
         else:
-            return True
+            return True  # should_stop: l'audio viene fermato dal chiamante
         if self.audio is not None:
             self.audio.set_paused(False)
         self.clock.rebase(n)  # nessun frame saltato per il tempo passato in pausa
@@ -263,8 +263,11 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     while not should_stop.is_set():
         if keys is not None:
             key = controls.poll()
-            if key is not None and keys.handle(key, n, last):
-                break
+            if key is not None:
+                if keys.handle(key, n, last):
+                    break
+                if key == "space":
+                    last_draw = None  # l'intervallo a cavallo della pausa non entra nelle statistiche
 
         fetch_start = clock.now()
         item = source.next_frame()

@@ -327,3 +327,14 @@ def test_seek_then_audio_time_matches_target():
                  audio=a, clock=make_clock(10, ft), controls=keys)
     i = a.events.index(("seek", 5.2))
     assert a.events[i + 1] == ("time", 5.2)
+
+
+def test_pause_time_not_recorded_in_fps_stats():
+    ft = FakeTime()
+    stats = FpsStats(10)
+    keys = FakeKeys({3: "space"}, after_pause=[None] * 200 + ["space"], ft=ft)  # 10 s di pausa
+    run_playback(ListSource(make(10)), 10, RecordingDisplay(), threading.Event(), loop=False,
+                 stats=stats, clock=make_clock(10, ft), controls=keys)
+    assert ft.now() > 10.0
+    assert len(stats._times) == 8  # 10 frame disegnati, intervallo a cavallo della pausa escluso
+    assert max(stats._times) < 1.0
