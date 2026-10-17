@@ -16,6 +16,7 @@ class TerminalDisplay:
         self._out = out if out is not None else sys.stdout.buffer
         self._rows: Optional[list] = None
         self._overlay: list = []
+        self._last_row = 0  # ultima riga (1-based) occupata da frame + overlay; 0 = nulla mostrato
 
     def invalidate(self) -> None:
         """Forza un ridisegno completo al prossimo show()."""
@@ -55,11 +56,22 @@ class TerminalDisplay:
             for i in range(len(self._overlay), old_overlay_len):
                 parts.append(b"\033[%d;1H\033[K" % (base + i))
 
+        self._last_row = len(rows) + 1 + len(self._overlay) if self._overlay else len(rows)
+
         if parts:
             self._out.write(b"".join(parts))
             self._out.flush()
 
     def restore(self) -> None:
-        """Ripristina colori e cursore."""
-        self._out.write(b"\033[0m\033[?25h")
+        """
+        Ripristina colori e cursore.
+
+        Se e' stato mostrato almeno un frame, porta prima il cursore a inizio riga
+        sotto frame e overlay: col ridisegno per righe resterebbe sull'ultimo blocco
+        modificato e il prompt della shell finirebbe dentro il frame. Si posiziona
+        sull'ultima riga e si emette un a capo (invece di saltare alla riga
+        successiva) cosi' a fondo schermo il terminale scorre invece di sovrascrivere.
+        """
+        prefix = b"\033[%d;1H\n" % self._last_row if self._last_row else b""
+        self._out.write(prefix + b"\033[0m\033[?25h")
         self._out.flush()

@@ -96,7 +96,29 @@ def test_row_count_change_redraws_fully():
 def test_restore_shows_cursor():
     buf = io.BytesIO()
     TerminalDisplay(buf).restore()
+    assert buf.getvalue() == b"\033[0m\033[?25h"  # nulla mostrato: nessun spostamento
+
+
+def _restore_after_delta(overlay):
+    buf = io.BytesIO()
+    d = TerminalDisplay(buf)
+    vt = VirtualTerminal()
+    base = make_frame(0)
+    d.show(base, overlay)
+    d.show(_variant(base, {3}))  # ridisegno per righe: il cursore resta sulla riga 4
+    d.restore()
+    vt.feed(buf.getvalue())
     assert buf.getvalue().endswith(b"\033[0m\033[?25h")
+    return vt
+
+
+def test_restore_moves_cursor_below_frame():
+    assert _restore_after_delta(None).cursor == (N_ROWS, 0)
+
+
+def test_restore_moves_cursor_below_overlay():
+    # frame: righe 0..19, riga vuota 20, overlay 21..22 -> cursore sulla riga 23
+    assert _restore_after_delta(["HUD1", "HUD2"]).cursor == (N_ROWS + 3, 0)
 
 
 def _variant(base: bytes, changed: set) -> bytes:

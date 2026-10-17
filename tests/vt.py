@@ -52,5 +52,10 @@ class VirtualTerminal:
         else:
             raise ValueError(f"CSI non supportata: {params}{final}")
 
+    @property
+    def cursor(self) -> tuple[int, int]:
+        """Posizione del cursore (riga, colonna), 0-based."""
+        return self._r, self._c
+
     def screen(self) -> list[str]:
         return ["".join(row) for row in self._grid]

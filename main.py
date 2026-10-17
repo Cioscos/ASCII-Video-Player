@@ -12,6 +12,8 @@ from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
 
 HIDE_CURSOR = '\033[?25l'
+# Ripristino colori e cursore (come TerminalDisplay.restore, idempotente)
+RESET_AND_SHOW_CURSOR = '\033[0m\033[?25h'
 
 # Palette 'extended' (67 caratteri), esposta a livello di modulo per i test
 EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
@@ -281,14 +283,54 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
         logger.exception(f"Errore durante la riproduzione: {e}")
         exit_code = 1
     finally:
-        if audio is not None:
-            audio.stop()
-        display.restore()
-        cached.close()
+        _shutdown(display, logger, audio.stop if audio is not None else None, cached.close)
 
     if stats is not None:
         logger.info(stats.summary())
     return exit_code
+
+
+def _shutdown(display, logger, *cleanups):
+    """
+    Ripristina subito il terminale, poi esegue le operazioni di chiusura.
+
+    Il terminale viene ripristinato per primo, così un secondo Ctrl+C durante la
+    chiusura non lascia il cursore nascosto; un KeyboardInterrupt in una chiusura
+    non impedisce l'esecuzione delle successive.
+
+    Args:
+        display (TerminalDisplay): Display da ripristinare
+        logger (logging.Logger): Logger configurato
+        *cleanups: Funzioni di chiusura senza argomenti (None viene ignorato)
+    """
+    display.restore()
+    for cleanup in cleanups:
+        if cleanup is None:
+            continue
+        try:
+            cleanup()
+        except KeyboardInterrupt:
+            logger.info("Interruzione da tastiera durante la chiusura, proseguo")
+
+
+def warn_if_frame_too_tall(height, logger):
+    """
+    Avvisa se il frame ASCII (più una riga) non entra nell'altezza del terminale.
+
+    Args:
+        height (int): Altezza del frame ASCII in righe
+        logger (logging.Logger): Logger configurato
+
+    Returns:
+        bool: True se il frame è troppo alto per il terminale
+    """
+    _, term_rows = get_terminal_size()
+    if height + 1 > term_rows:
+        logger.warning(
+            f"Il frame ASCII ({height} righe) supera l'altezza del terminale ({term_rows} righe): "
+            f"l'immagine risulterà distorta. Riduci la larghezza o la dimensione del font")
+        return True
+    return False
 
 
 def _start_audio(video_path, fps, logger):
@@ -361,10 +403,7 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
         logger.exception(f"Errore durante la riproduzione: {e}")
         exit_code = 1
     finally:
-        pipeline.stop()
-        if audio is not None:
-            audio.stop()
-        display.restore()
+        _shutdown(display, logger, pipeline.stop, audio.stop if audio is not None else None)
 
     if stats is not None:
         logger.info(stats.summary())
@@ -413,30 +452,38 @@ def main():
     except Exception as e:
         logger.error(f"Errore durante la calibrazione: {e}")
 
-    # Nascondi cursore
-    sys.stdout.write(HIDE_CURSOR)
-    sys.stdout.flush()
+    # Il terminale può essere stato ridimensionato durante la calibrazione
+    warn_if_frame_too_tall(new_height, logger)
 
-    # Ottieni palette ASCII
-    ascii_palette = get_ascii_palette(args, logger)
+    try:
+        # Nascondi cursore
+        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.flush()
 
-    # Esegui in modalità appropriata
-    if args.high_performance:
-        return run_high_performance_mode(
-            args,
-            (frame, fps_originale, frame_totali),
-            (width, new_height),
-            ascii_palette,
-            logger
-        )
-    else:
-        return run_standard_mode(
-            args,
-            (frame, fps_originale, frame_totali),
-            (width, new_height),
-            ascii_palette,
-            logger
-        )
+        # Ottieni palette ASCII
+        ascii_palette = get_ascii_palette(args, logger)
+
+        # Esegui in modalità appropriata
+        if args.high_performance:
+            return run_high_performance_mode(
+                args,
+                (frame, fps_originale, frame_totali),
+                (width, new_height),
+                ascii_palette,
+                logger
+            )
+        else:
+            return run_standard_mode(
+                args,
+                (frame, fps_originale, frame_totali),
+                (width, new_height),
+                ascii_palette,
+                logger
+            )
+    finally:
+        # Ripristina colori e cursore anche se un'eccezione precede i try delle modalità
+        sys.stdout.write(RESET_AND_SHOW_CURSOR)
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

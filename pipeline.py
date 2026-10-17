@@ -57,10 +57,14 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
         batch_size (int): Numero di frame per batch
         loop_video (bool): Se True, riavvia il video alla fine
     """
+    import signal
     import cv2
     from playback import FrameDecimator
     from utils import configure_process_logging
 
+    # Ctrl+C arriva a tutti i processi della console: lo gestisce solo il processo
+    # principale, che chiude la pipeline impostando should_stop
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     logger = configure_process_logging("Reader", console_level=logging.WARNING)
     decimator = FrameDecimator(source_fps, target_fps)
     video = None
@@ -110,7 +114,7 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
                     break
                 batch = []
     except KeyboardInterrupt:
-        pass
+        should_stop.set()
     except Exception as e:
         logger.exception(f"Errore nel processo di lettura: {e}")
         should_stop.set()
@@ -137,10 +141,13 @@ def frame_converter_process(width, height, palette, frame_queue, ascii_queue, sh
         log_performance (bool): Se True, logga (DEBUG) la media dei ms/frame ogni 100 frame
     """
     import queue
+    import signal
     import time
     from ascii_converter import AsciiConverter
     from utils import configure_process_logging
 
+    # Ctrl+C viene gestito solo dal processo principale (vedi frame_reader_process)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     logger = configure_process_logging("Converter", console_level=logging.WARNING)
     if log_performance:
         logger.setLevel(logging.DEBUG)
@@ -173,7 +180,7 @@ def frame_converter_process(width, height, palette, frame_queue, ascii_queue, sh
             if not put_until_stopped(ascii_queue, converted, should_stop):
                 break
     except KeyboardInterrupt:
-        pass
+        should_stop.set()
     except Exception as e:
         logger.exception(f"Errore nel processo di conversione: {e}")
         should_stop.set()
