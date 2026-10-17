@@ -100,11 +100,11 @@ def test_restore_shows_cursor():
 
 
 def _variant(base: bytes, changed: set) -> bytes:
-    """Sostituisce le righe indicate con righe di pari larghezza prese da un altro seed."""
+    """Sostituisce le righe indicate con righe di pari larghezza prese dalla riga successiva."""
     rows = base.split(b"\n")
     other = make_frame(99).split(b"\n")
     for r in changed:
-        rows[r] = other[r]
+        rows[r] = other[(r + 1) % N_ROWS]  # riga vicina: colore e testo diversi
     return b"\n".join(rows)
 
 
