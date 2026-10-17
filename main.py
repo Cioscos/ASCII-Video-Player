@@ -1,6 +1,5 @@
 import argparse
 import logging
-import signal
 import sys
 import time
 import os
@@ -286,9 +285,28 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
     return 0
 
 
+def _start_audio(video_path, fps, logger):
+    """
+    Avvia l'audio del video; in caso di problemi continua senza audio.
+
+    Returns:
+        AudioPlayer | None: Il player avviato, oppure None
+    """
+    try:
+        from audio_player import AudioPlayer
+        player = AudioPlayer(video_path, fps)
+        if player.initialize() and player.start():
+            logger.info("Riproduzione audio avviata")
+            return player
+        logger.warning("Audio non disponibile, continuo senza audio")
+    except Exception as e:
+        logger.warning(f"Impossibile avviare l'audio: {e}. Continuo senza audio")
+    return None
+
+
 def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger):
     """
-    Esegue il video in modalità standard con pipeline.
+    Esegue il video in modalità standard: pipeline multi-processo e riproduzione nel thread principale.
 
     Args:
         args (argparse.Namespace): Gli argomenti parsati
@@ -300,59 +318,51 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     Returns:
         int: Codice di uscita (0 per successo, altro valore per errore)
     """
+    from fps_stats import FpsStats
+    from playback import run_playback
+    from terminal_display import TerminalDisplay
+
     width, height = ascii_dimensions
-
-    # Inizializza pipeline
     pipeline = VideoPipeline(
-        args.video_path,
-        width,
-        args.fps,
-        args.batch_size,
-        args.log_performance,
-        args.log_fps,
-        ascii_palette=ascii_palette,
-        loop_video=not args.no_loop,
-        enable_audio=args.audio,
-        source_fps=video_info[1]
+        args.video_path, width, height, video_info[1], args.fps, args.batch_size, ascii_palette,
+        loop_video=not args.no_loop, log_performance=args.log_performance
     )
-
-    # Gestione segnali
-    def signal_handler(sig, frame):
-        logger.info("Segnale di interruzione ricevuto")
-        # L'arresto vero e proprio viene eseguito dal blocco finally
-        pipeline.should_stop.set()
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    display = TerminalDisplay()
+    stats = FpsStats(pipeline.effective_fps) if args.log_fps else None
+    audio = None
+    exit_code = 0
 
     try:
-        # Avvia pipeline
         pipeline.start()
 
-        # Mostra istruzioni
         print("\nASCII Video Player avviato!")
         print("Premi Ctrl+C per terminare\n")
         if not args.no_loop:
             print("Il video si ripeterà automaticamente alla fine")
         else:
             print("Il video terminerà automaticamente alla fine")
-        if args.audio:
-            print("Audio abilitato")
-
-        # Attendi termine
-        while not pipeline.should_stop.is_set():
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Interruzione da tastiera")
-    finally:
-        # Ferma pipeline
-        pipeline.stop()
-
-        # Mostra cursore
-        sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
 
-    return 0
+        if args.audio:
+            audio = _start_audio(args.video_path, pipeline.effective_fps, logger)
+
+        drawn = run_playback(pipeline.frame_source(), pipeline.effective_fps, display, pipeline.should_stop,
+                             loop=False, stats=stats, audio=audio)
+        logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
+    except KeyboardInterrupt:
+        logger.info("Interruzione da tastiera")
+    except Exception as e:
+        logger.exception(f"Errore durante la riproduzione: {e}")
+        exit_code = 1
+    finally:
+        pipeline.stop()
+        if audio is not None:
+            audio.stop()
+        display.restore()
+
+    if stats is not None:
+        logger.info(stats.summary())
+    return exit_code
 
 
 def main():

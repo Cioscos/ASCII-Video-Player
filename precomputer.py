@@ -13,6 +13,26 @@ import numpy as np
 from tqdm import tqdm
 
 
+class _OutputBuffer:
+    """Accumula il testo e lo scrive sul terminale in un'unica operazione al flush()."""
+
+    def __init__(self, stdout):
+        self.stdout = stdout
+        self.parts = []
+
+    def write(self, text):
+        self.parts.append(text)
+
+    def flush(self):
+        if not self.parts:
+            return
+        try:
+            self.stdout.write(''.join(self.parts))
+            self.stdout.flush()
+        except Exception:
+            pass
+        self.parts.clear()
+
 class FramePrecomputer:
     """
     Classe che gestisce la pre-elaborazione e il caching dei frame video.
@@ -509,11 +529,10 @@ class PrecomputedFramePlayer:
         Visualizza anche statistiche di performance come un grafico
         dei tempi di frame se richiesto.
         """
-        from terminal_output_buffer import TerminalOutputBuffer
         import sys
         import time
 
-        output_buffer = TerminalOutputBuffer(sys.stdout)
+        output_buffer = _OutputBuffer(sys.stdout)
 
         # Sequenze ANSI
         CURSOR_HOME = '\033[H'
