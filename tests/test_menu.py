@@ -282,3 +282,13 @@ def test_esc_on_main_quits():
 def test_quit_item():
     st = MenuState(Settings(), [])
     assert press(st, "down", "down", "down", "down", "enter") == "quit"
+
+
+def test_play_custom_palette_requires_file(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"")
+    st = MenuState(Settings(video_path=str(video), palette="custom"), [])
+    assert st.handle_key("enter") is None
+    assert st.message == "Seleziona un file per la palette custom"
+    st.settings.custom_palette = "p.txt"
+    assert st.handle_key("enter") == "play"

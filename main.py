@@ -7,7 +7,7 @@ import threading
 import cv2
 
 from ascii_converter import auto_width, compute_ascii_height
-from cache_manager import DEFAULT_LIMIT, enforce_limit, parse_size
+from cache_manager import DEFAULT_LIMIT, enforce_limit, list_caches, parse_size
 from calibration_frame import render_calibration_frame
 from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
@@ -53,6 +53,12 @@ def load_custom_palette(path):
     return palette
 
 
+CONTROLS_HINT_HP = ("Spazio pausa · q/Esc esci · ←/→ ±5 s · "
+                    "↓/↑ ±30 s · Ctrl+C termina")
+CONTROLS_HINT = ("Spazio pausa · q/Esc esci · Ctrl+C termina "
+                 "(seek solo con --high-performance)")
+
+
 def parse_arguments(argv=None):
     """
     Analizza gli argomenti della riga di comando.
@@ -79,12 +85,12 @@ def parse_arguments(argv=None):
                         help="Pre-elabora tutti i frame su disco per migliorare le performance")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "half", "custom"],
                         default="standard",
-                        help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (67 chars), box (colored blocks), half (half blocks, double vertical resolution)")
+                        help="Palette: basic (10 caratteri), standard (42), extended (67), box (blocchi colorati), half (mezzi blocchi, doppia risoluzione verticale), custom (da --custom-palette)")
     parser.add_argument("--custom-palette", type=str,
                         help="Path to a custom palette file. It can be a normal .txt file.")
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
     parser.add_argument("--truecolor", action="store_true",
-                        help="Use 24-bit colors instead of the 256-color palette")
+                        help="Usa colori a 24 bit invece della palette a 256 colori")
     parser.add_argument("--audio", action="store_true", help="Enable audio playback")
     parser.add_argument("--cache-limit", type=str, default=DEFAULT_LIMIT,
                         help=f"Limite di spazio per cached_frames, es. 500M, 2G (0 = nessun limite, default: {DEFAULT_LIMIT})")
@@ -296,8 +302,13 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
             return run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
 
     # Applica il limite di spazio, preservando la cache appena usata
-    for removed in enforce_limit("cached_frames", parse_size(args.cache_limit), keep={cache_dir}):
+    sizes = {os.path.abspath(e.path): e.size_bytes for e in list_caches("cached_frames")}
+    removed_list = enforce_limit("cached_frames", parse_size(args.cache_limit), keep={cache_dir})
+    for removed in removed_list:
         logger.info(f"Cache rimossa per il limite di spazio: {removed}")
+    if removed_list:
+        freed = sum(sizes.get(os.path.abspath(r), 0) for r in removed_list) / (1024 * 1024)
+        print(f"Liberati {freed:.0f} MB rimuovendo {len(removed_list)} cache (limite {args.cache_limit})")
 
     fps = cached.metadata["effective_fps"]
     stats = FpsStats(fps) if args.log_fps else None

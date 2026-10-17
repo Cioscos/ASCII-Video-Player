@@ -5,6 +5,9 @@ import time
 from collections import deque
 
 _WIN_PREFIXES = ("\x00", "\xe0")
+# Marcatore privato inserito da _read_raw_windows davanti a una coppia prefisso+codice
+# arrivata insieme: indica con certezza un tasto esteso (non la lettera "à")
+_EXT_MARK = "￾"
 _WIN_ARROWS = {"H": "up", "P": "down", "K": "left", "M": "right"}
 _POSIX_ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
 _SIMPLE = {
@@ -27,7 +30,13 @@ def decode_keys(chars: str, windows: bool) -> list[str]:
     n = len(chars)
     while i < n:
         c = chars[i]
-        if windows and c in _WIN_PREFIXES:
+        if windows and c == _EXT_MARK:
+            # Tasto esteso certo: frecce mappate, gli altri codici (Home, Canc, F11...) scartati
+            code = chars[i + 2] if i + 2 < n else ""
+            if code in _WIN_ARROWS:
+                keys.append(_WIN_ARROWS[code])
+            i += 3
+        elif windows and c in _WIN_PREFIXES:
             if i + 1 < n and chars[i + 1] in _WIN_ARROWS:
                 keys.append(_WIN_ARROWS[chars[i + 1]])
                 i += 2
@@ -74,10 +83,22 @@ class KeyReader:
                 self._fd = self._stream.fileno()
                 self._old_attrs = termios.tcgetattr(self._fd)
                 tty.setcbreak(self._fd)
+                termios.tcflush(self._fd, termios.TCIFLUSH)  # scarta i tasti gia' digitati
             except Exception:
                 self._old_attrs = None
                 self.active = False
+        elif self.active:
+            self._drain_windows()
         return self
+
+    def _drain_windows(self) -> None:
+        """Scarta i tasti digitati prima dell'avvio (es. durante la pre-elaborazione)."""
+        try:
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        except Exception:
+            pass
 
     def __exit__(self, exc_type, exc, tb):
         if self._old_attrs is not None:
@@ -96,7 +117,8 @@ class KeyReader:
             c = msvcrt.getwch()
             chars += c
             if c in _WIN_PREFIXES and msvcrt.kbhit():
-                chars += msvcrt.getwch()
+                # Seconda parte arrivata subito: e' un tasto esteso, non la lettera "à"
+                chars = chars[:-1] + _EXT_MARK + c + msvcrt.getwch()
         return chars
 
     def _read_raw_posix(self, timeout: float) -> str:

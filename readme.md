@@ -67,7 +67,7 @@ With no arguments, `python main.py` opens the interactive menu (it needs an inte
 
 ### Interactive menu
 
-The menu has five screens: **Riproduci** (play the selected video), **Video** (pick a file from `videos/` - `.mp4 .mov .avi .mkv .webm` - or type a path), **Impostazioni** (settings), **Cache** and **Esci** (quit). The settings are saved to `settings.json` (local file, gitignored) when you leave the Settings screen with Esc.
+The menu has five screens: **Riproduci** (play the selected video), **Video** (pick a file from `videos/` - `.mp4 .mov .avi .mkv .webm` - or type a path), **Impostazioni** (settings), **Cache** and **Esci** (quit). The settings are saved to `settings.json` (local file, gitignored) when you leave the Settings screen with Esc and when you start playback from the menu.
 
 | Key | Action |
 |-----|--------|
@@ -143,7 +143,7 @@ python main.py my_video.mp4 300 --fps 60 --palette extended --high-performance
 
 The cache is stored in `cached_frames/<video>_<hash>/` (`frames.bin`, `index.npy`, `metadata.json`). The hash covers the video path, size and modification time, width, height, effective FPS, palette and the converter version, so changing any of them creates a new cache. If the pre-computation fails, the player falls back to standard mode. Ctrl+C during pre-computation leaves no usable partial cache.
 
-The `--truecolor` flag is part of the hash too. **With converter version 3 (half blocks and truecolor) every cache created by earlier versions is regenerated on first use, and shows up as obsolete in the Cache screen of the menu.** Caches created by much older versions (`frame_*.txt` + `metadata.pkl`) are ignored as well and can be deleted by hand.
+The `--truecolor` flag is part of the hash too. **With converter version 3 (half blocks and truecolor) every cache created by earlier versions is regenerated on first use, and shows up as obsolete in the Cache screen of the menu.** Caches created by much older versions (`frame_*.txt` + `metadata.pkl`) are never reused: they show up as obsolete in the Cache screen (`o` deletes them), count toward the limit and are removed oldest first.
 
 ### Cache management
 

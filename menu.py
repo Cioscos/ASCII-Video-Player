@@ -202,6 +202,8 @@ class MenuState:
                 self.message = "Seleziona prima un video"
             elif not os.path.isfile(path):
                 self.message = f"Il file video '{path}' non esiste"
+            elif self.settings.palette == "custom" and not self.settings.custom_palette:
+                self.message = "Seleziona un file per la palette custom"
             else:
                 return "play"
         elif item == "Video":

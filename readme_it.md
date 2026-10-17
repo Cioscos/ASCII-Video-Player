@@ -67,7 +67,7 @@ Senza argomenti, `python main.py` apre il menu interattivo (serve un terminale i
 
 ### Menu interattivo
 
-Il menu ha cinque schermate: **Riproduci** (riproduce il video selezionato), **Video** (sceglie un file da `videos/` - `.mp4 .mov .avi .mkv .webm` - oppure si digita un percorso), **Impostazioni**, **Cache** ed **Esci**. Le impostazioni vengono salvate in `settings.json` (file locale, ignorato da git) quando si esce dalla schermata Impostazioni con Esc.
+Il menu ha cinque schermate: **Riproduci** (riproduce il video selezionato), **Video** (sceglie un file da `videos/` - `.mp4 .mov .avi .mkv .webm` - oppure si digita un percorso), **Impostazioni**, **Cache** ed **Esci**. Le impostazioni vengono salvate in `settings.json` (file locale, ignorato da git) quando si esce dalla schermata Impostazioni con Esc e quando si avvia la riproduzione dal menu.
 
 | Tasto | Azione |
 |-------|--------|
@@ -143,7 +143,7 @@ python main.py mio_video.mp4 300 --fps 60 --palette extended --high-performance
 
 La cache si trova in `cached_frames/<video>_<hash>/` (`frames.bin`, `index.npy`, `metadata.json`). L'hash comprende percorso, dimensione e data di modifica del video, larghezza, altezza, FPS effettivi, palette e versione del convertitore: cambiare uno di questi valori crea una nuova cache. Se la pre-elaborazione fallisce, il player ripiega sulla modalità standard. Un Ctrl+C durante la pre-elaborazione non lascia cache parziali utilizzabili.
 
-Anche il flag `--truecolor` fa parte dell'hash. **Con la versione 3 del convertitore (mezzi blocchi e truecolor) tutte le cache create da versioni precedenti vengono rigenerate al primo utilizzo e compaiono come obsolete nella schermata Cache del menu.** Le cache di versioni molto vecchie (`frame_*.txt` + `metadata.pkl`) vengono comunque ignorate e si possono cancellare a mano.
+Anche il flag `--truecolor` fa parte dell'hash. **Con la versione 3 del convertitore (mezzi blocchi e truecolor) tutte le cache create da versioni precedenti vengono rigenerate al primo utilizzo e compaiono come obsolete nella schermata Cache del menu.** Le cache di versioni molto vecchie (`frame_*.txt` + `metadata.pkl`) non vengono mai riutilizzate: compaiono come obsolete nella schermata Cache (`o` le cancella), contano nel limite e vengono rimosse dalla più vecchia.
 
 ### Gestione della cache
 

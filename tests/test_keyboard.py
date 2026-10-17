@@ -57,3 +57,42 @@ def test_read_returns_key_and_times_out(monkeypatch):
     k = _reader_attivo(monkeypatch, ["", "", "x"])
     assert k.read(1.0) == "x"
     assert k.read(0.05) is None
+
+
+def test_windows_extended_keys_marked_are_dropped():
+    m = "￾"
+    # Home, End, Canc, PgUp, PgDn, Ins, F11: nessun tasto; freccia mappata
+    assert decode_keys(m + "àG" + m + "àO" + m + "àS" + m + "àI"
+                       + m + "àQ" + m + "àR" + m + "à", windows=True) == []
+    assert decode_keys(m + "àHq" + m + "àSx", windows=True) == ["up", "q", "x"]
+
+
+def test_windows_lone_prefix_stays_a_grave():
+    assert decode_keys("à", windows=True) == ["à"]
+
+
+def test_read_raw_windows_marks_extended_pairs(monkeypatch):
+    import sys
+    import types
+    seq = list("àS") + ["à"]
+    fake = types.SimpleNamespace(kbhit=lambda: bool(seq), getwch=lambda: seq.pop(0))
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    k = KeyReader(io.StringIO())
+    k._windows = True
+    assert decode_keys(k._read_raw_windows(), windows=True) == ["à"]
+
+
+def test_enter_drains_pending_input_windows(monkeypatch):
+    import sys
+    import types
+    seq = list("abc")
+    fake = types.SimpleNamespace(kbhit=lambda: bool(seq), getwch=lambda: seq.pop(0))
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+    k = KeyReader(Tty())
+    k._windows = True
+    with k:
+        assert seq == []
