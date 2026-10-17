@@ -2,3 +2,10 @@
 .idea
 .images
 /run.bat
+
+__pycache__/
+build/
+cached_frames/
+logs/
+profile.out
+videos/
