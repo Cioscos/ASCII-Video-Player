@@ -16,7 +16,7 @@ HIDE_CURSOR = '\033[?25l'
 # Ripristino colori e cursore (come TerminalDisplay.restore, idempotente)
 RESET_AND_SHOW_CURSOR = '\033[0m\033[?25h'
 # Pulizia schermo e cursore in alto a sinistra
-CLEAR_SCREEN = '[2J[H'
+CLEAR_SCREEN = '\033[2J\033[H'
 
 # Palette 'extended' (67 caratteri), esposta a livello di modulo per i test
 EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
