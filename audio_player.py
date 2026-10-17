@@ -1,8 +1,7 @@
 import sounddevice as sd
-from moviepy import *
+import numpy as np
 import time
 import threading
-import queue
 import logging
 
 
@@ -18,7 +17,8 @@ class AudioPlayer:
         target_fps (float): FPS target per la riproduzione
         should_stop (threading.Event): Flag per la terminazione
         audio_thread (threading.Thread): Thread per la riproduzione dell'audio
-        sync_queue (queue.Queue): Coda per la sincronizzazione A/V
+        _pending_seek (float | None): Risincronizzazione pendente, applicata dal callback
+        underflows (int): Numero di callback con status non vuoto (underflow/overflow)
         audio_time (float): Tempo corrente di riproduzione audio in secondi
         video_time (float): Tempo corrente di riproduzione video in secondi
         sync_tolerance (float): Tolleranza di sincronizzazione in secondi
@@ -39,7 +39,8 @@ class AudioPlayer:
         self.target_fps = target_fps
         self.should_stop = threading.Event()
         self.audio_thread = None
-        self.sync_queue = queue.Queue()
+        self._pending_seek = None
+        self.underflows = 0
         self.audio_time = 0.0
         self.video_time = 0.0
         self.sync_tolerance = 0.1  # 100ms di tolleranza per la sincronizzazione
@@ -52,6 +53,28 @@ class AudioPlayer:
         self.samplerate = 0
         self.initialized = False
 
+    def load_array(self, samples, samplerate):
+        """
+        Carica i campioni audio in memoria.
+
+        Converte in float32 C-contiguo; mono viene duplicato su 2 canali e
+        più di 2 canali vengono mediati su 2 canali.
+
+        Args:
+            samples (numpy.ndarray): Campioni di forma (n,) o (n, canali)
+            samplerate (int): Frequenza di campionamento in Hz
+        """
+        arr = np.asarray(samples, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        if arr.shape[1] == 1:
+            arr = np.repeat(arr, 2, axis=1)
+        elif arr.shape[1] > 2:
+            arr = np.repeat(arr.mean(axis=1, keepdims=True), 2, axis=1)
+        self.audio_array = np.ascontiguousarray(arr, dtype=np.float32)
+        self.samplerate = int(samplerate)
+        self.initialized = True
+
     def initialize(self):
         """
         Inizializza l'audio estraendolo dal video.
@@ -62,106 +85,74 @@ class AudioPlayer:
         Returns:
             bool: True se l'inizializzazione è avvenuta con successo, False altrimenti
         """
+        video_clip = None
         try:
-            # Estrai audio dal video usando moviepy
+            from moviepy import VideoFileClip
+
             self.logger.info(f"Estrazione audio da {self.video_path}")
             video_clip = VideoFileClip(self.video_path)
 
-            # Ottieni l'audio clip dal video
-            self.audio_clip = video_clip.audio
-            if self.audio_clip is None:
+            audio_clip = video_clip.audio
+            if audio_clip is None:
                 self.logger.warning("Il video non contiene audio")
                 return False
 
-            # Ottieni i dati audio come array numpy
-            self.audio_array = self.audio_clip.to_soundarray()
-            self.samplerate = self.audio_clip.fps
-
-            # Mantieni l'audio in stereo se disponibile
-            if len(self.audio_array.shape) > 1 and self.audio_array.shape[1] > 1:
-                self.audio_array = self.audio_array
-
-            self.logger.info(f"Audio estratto: {self.samplerate} Hz, durata: {self.audio_clip.duration} sec")
-            self.initialized = True
+            samples = audio_clip.to_soundarray()
+            samplerate = audio_clip.fps
+            duration = audio_clip.duration
+            self.load_array(samples, samplerate)
+            self.logger.info(f"Audio estratto: {self.samplerate} Hz, durata: {duration} sec")
             return True
         except Exception as e:
             self.logger.error(f"Errore nell'inizializzazione dell'audio: {e}")
             return False
+        finally:
+            if video_clip is not None:
+                try:
+                    video_clip.close()
+                except Exception as e:
+                    self.logger.warning(f"Errore nella chiusura del video: {e}")
 
     def _audio_callback(self, outdata, frames, time_info, status):
         """
-        Callback per il sounddevice stream.
+        Callback per il sounddevice stream (eseguito sul thread audio).
 
-        Fornisce i dati audio da riprodurre e gestisce la sincronizzazione con il video
-        in tempo reale.
+        Applica l'eventuale risincronizzazione pendente, copia i campioni con
+        wrap-around (l'audio va in loop insieme al video) e avanza audio_time.
+        Non registra log né restituisce mai CallbackStop.
 
         Args:
             outdata (numpy.ndarray): Buffer di output per i dati audio
             frames (int): Numero di frame da fornire
             time_info (dict): Informazioni sul tempo
             status (CallbackFlags): Stato della riproduzione
-
-        Returns:
-            CallbackStop: Segnala la fine della riproduzione se necessario
         """
         if status:
-            self.logger.warning(f"Status audio: {status}")
+            self.underflows += 1
 
-        # Calcola l'indice di inizio per i dati audio
-        start_idx = int(self.audio_time * self.samplerate)
-        end_idx = start_idx + frames
-
-        # Verifica se abbiamo raggiunto la fine dell'audio
-        if start_idx >= len(self.audio_array):
+        audio = self.audio_array
+        if audio is None:
             outdata.fill(0)
-            if not self.should_stop.is_set():
-                self.should_stop.set()
-            return sd.CallbackStop
+            return
+        total = len(audio)
+        if total == 0:
+            outdata.fill(0)
+            return
 
-        # Aggiorna il tempo audio corrente
-        self.audio_time += frames / self.samplerate
+        seek = self._pending_seek
+        if seek is not None:
+            self._pending_seek = None
+            self.audio_time = seek
 
-        # Verifica di sincronizzazione con il video
-        try:
-            # Controlla se ci sono comandi di sincronizzazione nella coda
-            while not self.sync_queue.empty():
-                cmd = self.sync_queue.get_nowait()
-                if cmd["type"] == "set_time":
-                    # Aggiorna il tempo audio
-                    new_time = cmd["time"]
-                    self.logger.debug(f"Sincronizzazione: audio={self.audio_time:.3f}, video={new_time:.3f}")
+        pos = int(self.audio_time * self.samplerate) % total
+        done = 0
+        while done < frames:
+            n = min(frames - done, total - pos)
+            outdata[done:done + n] = audio[pos:pos + n]
+            done += n
+            pos = (pos + n) % total
 
-                    # Se la differenza è significativa, risincronizza
-                    if abs(self.audio_time - new_time) > self.sync_tolerance:
-                        self.audio_time = new_time
-                        start_idx = int(new_time * self.samplerate)
-                        end_idx = start_idx + frames
-                        self.logger.info(f"Risincronizzazione audio a {new_time:.3f}s")
-        except queue.Empty:
-            pass
-
-        # Copia i dati audio nel buffer di output
-        if end_idx <= len(self.audio_array):
-            if len(self.audio_array.shape) > 1:  # Stereo
-                outdata[:] = self.audio_array[start_idx:end_idx]
-            else:  # Mono
-                outdata[:, 0] = self.audio_array[start_idx:end_idx]
-        else:
-            # Gestisci il caso in cui raggiungiamo la fine dell'audio
-            remaining = len(self.audio_array) - start_idx
-            if remaining > 0:
-                if len(self.audio_array.shape) > 1:  # Stereo
-                    outdata[:remaining] = self.audio_array[start_idx:]
-                else:  # Mono
-                    outdata[:remaining, 0] = self.audio_array[start_idx:]
-                outdata[remaining:] = 0
-            else:
-                outdata.fill(0)
-
-            # Segnala la fine dell'audio
-            if not self.should_stop.is_set():
-                self.should_stop.set()
-            return sd.CallbackStop
+        self.audio_time = (self.audio_time + frames / self.samplerate) % (total / self.samplerate)
 
     def _audio_thread_func(self):
         """
@@ -175,7 +166,7 @@ class AudioPlayer:
             # Crea uno stream audio
             with sd.OutputStream(
                     samplerate=self.samplerate,
-                    channels=2 if len(self.audio_array.shape) > 1 else 1,
+                    channels=2,
                     callback=self._audio_callback
             ) as self.stream:
                 self.logger.info("Riproduzione audio avviata")
@@ -215,20 +206,17 @@ class AudioPlayer:
         """
         Aggiorna il tempo di riproduzione video e gestisce la sincronizzazione.
 
-        Confronta il tempo video con il tempo audio e invia comandi di sincronizzazione
-        quando necessario.
+        Confronta il tempo video con il tempo audio e registra una risincronizzazione
+        pendente quando necessario.
 
         Args:
             current_time (float): Tempo corrente di riproduzione video in secondi
         """
         self.video_time = current_time
 
-        # Invia un comando di sincronizzazione se la differenza è significativa
+        # Richiede una risincronizzazione (applicata dal callback) se la differenza è significativa
         if abs(self.audio_time - self.video_time) > self.sync_tolerance:
-            self.sync_queue.put({
-                "type": "set_time",
-                "time": current_time
-            })
+            self._pending_seek = current_time
 
     def stop(self):
         """
@@ -242,6 +230,8 @@ class AudioPlayer:
             return
 
         self.logger.info("Arresto riproduzione audio")
+        if self.underflows:
+            self.logger.warning(f"Underflow/overflow audio: {self.underflows}")
         self.should_stop.set()
 
         # Timeout ridotto per il join del thread audio
