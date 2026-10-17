@@ -70,12 +70,14 @@ def parse_arguments():
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing frames (default: 1)")
     parser.add_argument("--high-performance", action="store_true",
                         help="Pre-elabora tutti i frame su disco per migliorare le performance")
-    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "custom"],
+    parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "half", "custom"],
                         default="standard",
-                        help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (67 chars)")
+                        help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (67 chars), box (colored blocks), half (half blocks, double vertical resolution)")
     parser.add_argument("--custom-palette", type=str,
                         help="Path to a custom palette file. It can be a normal .txt file.")
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
+    parser.add_argument("--truecolor", action="store_true",
+                        help="Use 24-bit colors instead of the 256-color palette")
     parser.add_argument("--audio", action="store_true", help="Enable audio playback")
 
     return parser.parse_args()
@@ -184,6 +186,10 @@ def get_ascii_palette(args, logger):
     Returns:
         str: La palette ASCII da utilizzare
     """
+    if args.palette == 'half':
+        logger.info("Utilizzando metodo palette half (mezzi blocchi)")
+        return 'half'
+
     if args.palette == 'box':
         logger.info("Utilizzando metodo palette box")
         return 'box'
@@ -234,7 +240,8 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
     logger.info("Modalità high-performance attivata")
 
     effective_fps = FrameDecimator(source_fps, args.fps).effective_fps
-    cache_dir = cache_dir_for(args.video_path, width, height, effective_fps, ascii_palette)
+    cache_dir = cache_dir_for(args.video_path, width, height, effective_fps, ascii_palette,
+                              truecolor=args.truecolor)
     cached = CachedFrames.open(cache_dir)
     if cached is not None:
         logger.info(f"Cache esistente riutilizzata: {cache_dir}")
@@ -244,7 +251,8 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
         print("Questo processo potrebbe richiedere tempo ma migliorerà le performance.")
         sys.stdout.flush()
         try:
-            cache_dir = precompute(args.video_path, width, height, source_fps, args.fps, ascii_palette)
+            cache_dir = precompute(args.video_path, width, height, source_fps, args.fps, ascii_palette,
+                                 truecolor=args.truecolor)
         except KeyboardInterrupt:
             logger.info("Pre-elaborazione interrotta da tastiera")
             display.restore()
@@ -373,7 +381,7 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     width, height = ascii_dimensions
     pipeline = VideoPipeline(
         args.video_path, width, height, video_info[1], args.fps, args.batch_size, ascii_palette,
-        loop_video=not args.no_loop, log_performance=args.log_performance
+        loop_video=not args.no_loop, log_performance=args.log_performance, truecolor=args.truecolor
     )
     display = TerminalDisplay()
     stats = FpsStats(pipeline.effective_fps) if args.log_fps else None

@@ -5,30 +5,10 @@ from multiprocessing import Pool
 import cv2
 import pytest
 
-from ascii_converter import AsciiConverter
+from ascii_converter import AsciiConverter, make_converter
 from playback import FrameDecimator
 from precomputer import CachedFrames, CachedFrameSource, _init_worker, cache_dir_for, precompute
-
-
-def nth_kept_frame(video, n):
-    """n-esimo frame sorgente tenuto da FrameDecimator(24.0, 12)."""
-    decimator = FrameDecimator(24.0, 12)
-    cap = cv2.VideoCapture(video)
-    try:
-        source_index = 0
-        kept = 0
-        while True:
-            ok, frame = cap.read()
-            assert ok, "video terminato prima del frame richiesto"
-            keep = decimator.should_keep(source_index)
-            source_index += 1
-            if not keep:
-                continue
-            if kept == n:
-                return frame
-            kept += 1
-    finally:
-        cap.release()
+from tests.conftest import nth_kept_frame
 
 
 def test_roundtrip(tiny_video, tmp_path):
@@ -132,3 +112,17 @@ def test_pool_worker_ignores_sigint():
     # Ctrl+C va gestito solo dal processo principale (terminate del Pool)
     with Pool(1, initializer=_init_worker, initargs=(8, 4, " .:@")) as pool:
         assert pool.apply(signal.getsignal, (signal.SIGINT,)) == signal.SIG_IGN
+
+
+def test_truecolor_changes_cache_key(tiny_video, tmp_path):
+    assert cache_dir_for(tiny_video, 32, 8, 12, "half", str(tmp_path)) !=            cache_dir_for(tiny_video, 32, 8, 12, "half", str(tmp_path), truecolor=True)
+
+
+def test_precompute_half_truecolor_roundtrip(tiny_video, tmp_path):
+    d = precompute(tiny_video, 32, 8, 24.0, 12, "half", str(tmp_path), processes=2, truecolor=True)
+    c = CachedFrames.open(d)
+    try:
+        assert c.metadata["truecolor"] is True
+        assert c.frame(3) == make_converter(32, 8, "half", truecolor=True).convert_frame(nth_kept_frame(tiny_video, 3))
+    finally:
+        c.close()

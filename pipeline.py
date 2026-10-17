@@ -130,18 +130,20 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
         logger.info("Processo di lettura terminato")
 
 
-def frame_converter_process(width, height, palette, frame_queue, ascii_queue, should_stop, log_performance=False):
+def frame_converter_process(width, height, palette, frame_queue, ascii_queue, should_stop, log_performance=False,
+                            truecolor=False):
     """
     Processo di conversione: trasforma i batch di frame ridimensionati in bytes ANSI.
 
     Args:
         width (int): Larghezza della griglia ASCII
         height (int): Altezza della griglia ASCII
-        palette (str): Caratteri della palette oppure 'box'
+        palette (str): Caratteri della palette, 'box' oppure 'half'
         frame_queue (multiprocessing.Queue): Coda dei frame ridimensionati
         ascii_queue (multiprocessing.Queue): Coda dei batch di (indice, bytes)
         should_stop (multiprocessing.Event): Evento di terminazione
         log_performance (bool): Se True, logga (DEBUG) la media dei ms/frame ogni 100 frame
+        truecolor (bool): Se True, colori a 24 bit invece della palette a 256 colori
     """
     import signal
 
@@ -150,14 +152,14 @@ def frame_converter_process(width, height, palette, frame_queue, ascii_queue, sh
 
     import queue
     import time
-    from ascii_converter import AsciiConverter
+    from ascii_converter import make_converter
     from utils import configure_process_logging
 
     logger = configure_process_logging("Converter", console_level=logging.WARNING)
     if log_performance:
         logger.setLevel(logging.DEBUG)
     try:
-        converter = AsciiConverter(width, height, palette)
+        converter = make_converter(width, height, palette, truecolor)
         logger.info(f"Avvio conversione {width}x{height}")
         total_time = 0.0
         count = 0
@@ -251,7 +253,7 @@ class VideoPipeline:
     """
 
     def __init__(self, video_path, width, height, source_fps, target_fps, batch_size, palette, loop_video,
-                 log_performance=False):
+                 log_performance=False, truecolor=False):
         """
         Args:
             video_path (str): Percorso del file video
@@ -260,10 +262,12 @@ class VideoPipeline:
             source_fps (float): FPS del video sorgente
             target_fps (float | None): FPS richiesti
             batch_size (int): Numero di frame per batch
-            palette (str): Caratteri della palette oppure 'box'
+            palette (str): Caratteri della palette, 'box' oppure 'half'
             loop_video (bool): Se True, il video riparte alla fine
             log_performance (bool): Se True, il converter logga i tempi di conversione
+            truecolor (bool): Se True, colori a 24 bit
         """
+        from ascii_converter import pixel_rows
         from playback import FrameDecimator
         self.video_path = video_path
         self.width = width
@@ -274,6 +278,9 @@ class VideoPipeline:
         self.palette = palette
         self.loop_video = loop_video
         self.log_performance = log_performance
+        self.truecolor = truecolor
+        # Righe di pixel che il reader deve produrre (il doppio delle righe di testo con 'half')
+        self.resize_height = pixel_rows(height, palette)
         self.effective_fps = FrameDecimator(source_fps, target_fps).effective_fps
 
         queue_size = max(2, math.ceil(2 * self.effective_fps / self.batch_size))
@@ -294,14 +301,14 @@ class VideoPipeline:
         """Avvia i processi di lettura e conversione."""
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
-            args=(self.video_path, self.width, self.height, self.source_fps, self.target_fps,
+            args=(self.video_path, self.width, self.resize_height, self.source_fps, self.target_fps,
                   self.frame_queue, self.should_stop, self.batch_size, self.loop_video),
             daemon=True,
         )
         self.converter_process = multiprocessing.Process(
             target=frame_converter_process,
             args=(self.width, self.height, self.palette, self.frame_queue, self.ascii_queue,
-                  self.should_stop, self.log_performance),
+                  self.should_stop, self.log_performance, self.truecolor),
             daemon=True,
         )
         self.reader_process.start()

@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 CHAR_ASPECT_CORRECTION = 2.25
-CONVERTER_VERSION = 2
+CONVERTER_VERSION = 3
 
 _BLOCK_CHAR = '█'
 

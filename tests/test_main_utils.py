@@ -1,3 +1,4 @@
+import sys
 import pytest
 
 import main
@@ -51,3 +52,9 @@ def test_shutdown_restores_first_and_survives_interrupt():
     import logging
     main._shutdown(FakeDisplay(), logging.getLogger("test_main"), interrupted, None, lambda: calls.append("close"))
     assert calls == ["restore", "stop", "close"]
+
+
+def test_cli_accepts_half_and_truecolor(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["main.py", "v.mp4", "80", "--palette", "half", "--truecolor"])
+    a = main.parse_arguments()
+    assert a.palette == "half" and a.truecolor

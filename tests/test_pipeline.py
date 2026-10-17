@@ -1,8 +1,10 @@
 import io
 
+from ascii_converter import make_converter
 from pipeline import VideoPipeline
 from playback import run_playback
 from terminal_display import TerminalDisplay
+from tests.conftest import nth_kept_frame
 
 
 def test_no_loop_plays_every_decimated_frame_and_exits(tiny_video):
@@ -64,3 +66,13 @@ def test_partial_last_batch_then_marker(tiny_video):
     finally:
         p.stop()
     assert drawn == 24
+
+
+def test_half_truecolor_pipeline_matches_converter(tiny_video):
+    p = VideoPipeline(tiny_video, 16, 6, 24.0, 12, 4, "half", loop_video=False, truecolor=True); p.start()
+    try:
+        first = p.frame_source().next_frame()
+    finally:
+        p.stop()
+    conv = make_converter(16, 6, "half", truecolor=True)
+    assert first[0] == 0 and first[1] == conv.convert_frame(nth_kept_frame(tiny_video, 0))

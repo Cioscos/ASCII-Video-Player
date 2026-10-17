@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from ascii_converter import CONVERTER_VERSION, AsciiConverter
+from ascii_converter import CONVERTER_VERSION, make_converter
 from playback import FrameDecimator
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,13 @@ METADATA_FILE = "metadata.json"
 _worker_converter = None
 
 
-def cache_dir_for(video_path, width, height, effective_fps, palette, cache_root="cached_frames") -> str:
+def cache_dir_for(video_path, width, height, effective_fps, palette, cache_root="cached_frames",
+                  truecolor=False) -> str:
     """
     Directory di cache per un video e i parametri di conversione.
 
     La chiave cambia se cambiano il file (percorso, dimensione, data di modifica),
-    le dimensioni della griglia, gli fps effettivi, la palette o la versione del convertitore.
+    le dimensioni della griglia, gli fps effettivi, la palette, i colori a 24 bit o la versione del convertitore.
 
     Returns:
         str: "<cache_root>/<nome video>_<sha1[:12]>"
@@ -45,14 +46,14 @@ def cache_dir_for(video_path, width, height, effective_fps, palette, cache_root=
     st = os.stat(abs_path)
     key = "|".join(str(part) for part in (
         abs_path, st.st_size, st.st_mtime_ns, int(width), int(height),
-        round(float(effective_fps), 3), palette, CONVERTER_VERSION,
+        round(float(effective_fps), 3), palette, bool(truecolor), CONVERTER_VERSION,
     ))
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
     name = os.path.splitext(os.path.basename(abs_path))[0]
     return os.path.join(cache_root, f"{name}_{digest}")
 
 
-def _init_worker(width, height, palette):
+def _init_worker(width, height, palette, truecolor=False):
     """
     Inizializzatore del pool: crea il convertitore del processo worker.
 
@@ -64,8 +65,8 @@ def _init_worker(width, height, palette):
     global _worker_converter
     import signal
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    from ascii_converter import AsciiConverter
-    _worker_converter = AsciiConverter(width, height, palette)
+    from ascii_converter import make_converter
+    _worker_converter = make_converter(width, height, palette, truecolor)
 
 
 def _convert_worker(resized):
@@ -100,7 +101,7 @@ def _remove_quietly(path):
 
 
 def precompute(video_path, width, height, source_fps, target_fps, palette, cache_root="cached_frames",
-               processes: int | None = None, max_frames: int | None = None) -> str | None:
+               processes: int | None = None, max_frames: int | None = None, truecolor: bool = False) -> str | None:
     """
     Converte tutti i frame decimati del video e li salva nella cache binaria.
 
@@ -114,7 +115,7 @@ def precompute(video_path, width, height, source_fps, target_fps, palette, cache
     """
     decimator = FrameDecimator(source_fps, target_fps)
     effective_fps = decimator.effective_fps
-    cache_dir = cache_dir_for(video_path, width, height, effective_fps, palette, cache_root)
+    cache_dir = cache_dir_for(video_path, width, height, effective_fps, palette, cache_root, truecolor)
     if processes is None:
         processes = min(os.cpu_count() or 1, 8)
 
@@ -141,7 +142,7 @@ def precompute(video_path, width, height, source_fps, target_fps, palette, cache
 
     logger.info(f"Pre-elaborazione: {video_path}, {width}x{height}, fps effettivi {effective_fps}, "
                 f"processi {processes}, cache {cache_dir}")
-    converter = AsciiConverter(width, height, palette)
+    converter = make_converter(width, height, palette, truecolor)
     offsets = [0]
     try:
         frames_iter = _resized_frames(cap, converter, decimator, max_frames)
@@ -155,7 +156,7 @@ def precompute(video_path, width, height, source_fps, target_fps, palette, cache
                 from multiprocessing import Pool
                 # frames_iter (decodifica con cap) viene consumato dal thread task-handler del Pool:
                 # l'uscita dal with (terminate) deve avvenire prima di cap.release(), non riordinare.
-                with Pool(processes, initializer=_init_worker, initargs=(width, height, palette)) as pool:
+                with Pool(processes, initializer=_init_worker, initargs=(width, height, palette, truecolor)) as pool:
                     for data in pool.imap(_convert_worker, frames_iter, chunksize=8):
                         write(data)
             else:
@@ -176,6 +177,7 @@ def precompute(video_path, width, height, source_fps, target_fps, palette, cache
             "width": width,
             "height": height,
             "palette": palette,
+            "truecolor": bool(truecolor),
             "video_path": os.path.abspath(video_path),
             "converter_version": CONVERTER_VERSION,
         }

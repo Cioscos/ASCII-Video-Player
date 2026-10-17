@@ -2,6 +2,29 @@ import cv2
 import numpy as np
 import pytest
 
+from playback import FrameDecimator
+
+
+def nth_kept_frame(video, n):
+    """n-esimo frame sorgente tenuto da FrameDecimator(24.0, 12)."""
+    decimator = FrameDecimator(24.0, 12)
+    cap = cv2.VideoCapture(video)
+    try:
+        source_index = 0
+        kept = 0
+        while True:
+            ok, frame = cap.read()
+            assert ok, "video terminato prima del frame richiesto"
+            keep = decimator.should_keep(source_index)
+            source_index += 1
+            if not keep:
+                continue
+            if kept == n:
+                return frame
+            kept += 1
+    finally:
+        cap.release()
+
 
 @pytest.fixture
 def random_frame():
