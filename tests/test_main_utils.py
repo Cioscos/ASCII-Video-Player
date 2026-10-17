@@ -58,3 +58,8 @@ def test_cli_accepts_half_and_truecolor(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main.py", "v.mp4", "80", "--palette", "half", "--truecolor"])
     a = main.parse_arguments()
     assert a.palette == "half" and a.truecolor
+
+
+def test_open_controls_returns_key_reader():
+    from keyboard_input import KeyReader
+    assert isinstance(main._open_controls(), KeyReader)

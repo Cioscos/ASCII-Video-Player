@@ -271,32 +271,39 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
     audio = None
     exit_code = 0
 
-    try:
-        print("\nASCII Video Player avviato in modalità high-performance!")
-        print("Premi Ctrl+C per terminare\n")
-        if not args.no_loop:
-            print("Il video si ripeterà automaticamente alla fine")
-        else:
-            print("Il video terminerà automaticamente alla fine")
-        sys.stdout.flush()
+    with _open_controls() as keys:
+        try:
+            print("\nASCII Video Player avviato in modalità high-performance!")
+            print("Premi Ctrl+C per terminare\n")
+            if not args.no_loop:
+                print("Il video si ripeterà automaticamente alla fine")
+            else:
+                print("Il video terminerà automaticamente alla fine")
+            sys.stdout.flush()
 
-        if args.audio:
-            audio = _start_audio(args.video_path, fps, logger)
+            if args.audio:
+                audio = _start_audio(args.video_path, fps, logger)
 
-        drawn = run_playback(CachedFrameSource(cached), fps, display, threading.Event(),
-                             loop=not args.no_loop, stats=stats, audio=audio)
-        logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
-    except KeyboardInterrupt:
-        logger.info("Interruzione da tastiera")
-    except Exception as e:
-        logger.exception(f"Errore durante la riproduzione: {e}")
-        exit_code = 1
-    finally:
-        _shutdown(display, logger, audio.stop if audio is not None else None, cached.close)
+            drawn = run_playback(CachedFrameSource(cached), fps, display, threading.Event(),
+                                 loop=not args.no_loop, stats=stats, audio=audio, controls=keys)
+            logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
+        except KeyboardInterrupt:
+            logger.info("Interruzione da tastiera")
+        except Exception as e:
+            logger.exception(f"Errore durante la riproduzione: {e}")
+            exit_code = 1
+        finally:
+            _shutdown(display, logger, audio.stop if audio is not None else None, cached.close)
 
     if stats is not None:
         logger.info(stats.summary())
     return exit_code
+
+
+def _open_controls():
+    """Apre il lettore dei tasti (inattivo se stdin non è un terminale)."""
+    from keyboard_input import KeyReader
+    return KeyReader()
 
 
 def _shutdown(display, logger, *cleanups):
@@ -394,30 +401,31 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     audio = None
     exit_code = 0
 
-    try:
-        pipeline.start()
+    with _open_controls() as keys:
+        try:
+            pipeline.start()
 
-        print("\nASCII Video Player avviato!")
-        print("Premi Ctrl+C per terminare\n")
-        if not args.no_loop:
-            print("Il video si ripeterà automaticamente alla fine")
-        else:
-            print("Il video terminerà automaticamente alla fine")
-        sys.stdout.flush()
+            print("\nASCII Video Player avviato!")
+            print("Premi Ctrl+C per terminare\n")
+            if not args.no_loop:
+                print("Il video si ripeterà automaticamente alla fine")
+            else:
+                print("Il video terminerà automaticamente alla fine")
+            sys.stdout.flush()
 
-        if args.audio:
-            audio = _start_audio(args.video_path, pipeline.effective_fps, logger)
+            if args.audio:
+                audio = _start_audio(args.video_path, pipeline.effective_fps, logger)
 
-        drawn = run_playback(pipeline.frame_source(), pipeline.effective_fps, display, pipeline.should_stop,
-                             loop=False, stats=stats, audio=audio)
-        logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
-    except KeyboardInterrupt:
-        logger.info("Interruzione da tastiera")
-    except Exception as e:
-        logger.exception(f"Errore durante la riproduzione: {e}")
-        exit_code = 1
-    finally:
-        _shutdown(display, logger, pipeline.stop, audio.stop if audio is not None else None)
+            drawn = run_playback(pipeline.frame_source(), pipeline.effective_fps, display, pipeline.should_stop,
+                                 loop=False, stats=stats, audio=audio, controls=keys)
+            logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
+        except KeyboardInterrupt:
+            logger.info("Interruzione da tastiera")
+        except Exception as e:
+            logger.exception(f"Errore durante la riproduzione: {e}")
+            exit_code = 1
+        finally:
+            _shutdown(display, logger, pipeline.stop, audio.stop if audio is not None else None)
 
     if stats is not None:
         logger.info(stats.summary())
