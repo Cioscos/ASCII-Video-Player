@@ -530,6 +530,9 @@ class PrecomputedFramePlayer:
         last_frame_time = None
         frame_times = []
         recent_frame_times = []  # Per il grafico
+        from playback import PlaybackClock
+        clock = PlaybackClock(self.target_fps)  # Scadenze assolute di riproduzione
+        n = 0  # Contatore di riproduzione monotono (non si azzera al loop)
         max_graph_points = 50  # Numero massimo di punti nel grafico
         stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
 
@@ -730,8 +733,6 @@ class PrecomputedFramePlayer:
 
             # Loop di riproduzione
             while not self.should_stop.is_set():
-                frame_start_time = time.time()
-
                 # Carica il frame corrente
                 frame_file = os.path.join(self.frames_dir, f"frame_{self.current_frame:06d}.txt")
 
@@ -746,20 +747,21 @@ class PrecomputedFramePlayer:
                         break
                     continue
 
-                # Calcola timing
-                frame_duration = 1.0 / self.target_fps
-
                 # Sincronizzazione audio
                 if self.enable_audio and self.audio_player:
                     video_time = (self.current_frame / self.total_frames) * self.video_duration
                     self.audio_player.update_video_time(video_time)
+
+                # Attesa fino alla scadenza assoluta del frame (nessuna deriva)
+                clock.wait_for(n)
+                n += 1
 
                 # Rendering frame
                 output_buffer.write(CURSOR_HOME)
                 output_buffer.write(ascii_frame)
 
                 # Calcola tempo corrente
-                current_time = time.time()
+                current_time = time.perf_counter()
 
                 # Calcola e registra il frame time se non è il primo frame
                 if last_frame_time is not None:
@@ -788,20 +790,15 @@ class PrecomputedFramePlayer:
                         )
 
                         # Visualizzazione completa
-                        fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
+                        # Ogni riga termina con \033[K per cancellare i residui del frame precedente
+                        fps_display = "\033[K\n\033[K\n" + f"{fps_stats}\n{frame_time_graph}".replace(
+                            "\n", "\033[K\n") + "\033[K"
                         output_buffer.write(fps_display)
 
                 output_buffer.flush()
 
                 # Aggiorna timestamp per statistiche
                 last_frame_time = current_time
-
-                # Calcola tempo di elaborazione e attendi se necessario
-                process_time = time.time() - current_time
-                sleep_time = frame_duration - process_time
-
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
 
                 # Passa al frame successivo
                 self.current_frame += 1

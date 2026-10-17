@@ -514,6 +514,9 @@ class VideoPipeline:
 
         last_frame_time = None  # Tempo dell'ultimo frame visualizzato
         frame_times = []  # Intervalli tra frame consecutivi
+        from playback import PlaybackClock
+        clock = PlaybackClock(self.target_fps)  # Scadenze assolute di riproduzione
+        n = 0  # Contatore di riproduzione monotono (non l'indice del frame video)
         frame_count = 0  # Contatore per aggiornamenti periodici
         stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
         max_graph_points = 50  # Numero massimo di punti nel grafico
@@ -743,16 +746,9 @@ class VideoPipeline:
                         if hasattr(self, 'current_frame'):
                             self.current_frame = frame_count
 
-                        # Tempo corrente
-                        current_time = time.time()
-
-                        # Gestione timing con target FPS
-                        if last_frame_time is not None:
-                            elapsed = current_time - last_frame_time
-                            if self.target_fps and elapsed < 1.0 / self.target_fps:
-                                sleep_time = 1.0 / self.target_fps - elapsed
-                                if sleep_time > 0.001:  # Solo se > 1ms
-                                    time.sleep(sleep_time)
+                        # Attesa fino alla scadenza assoluta del frame (nessuna deriva)
+                        clock.wait_for(n)
+                        n += 1
 
                         # Pulizia schermo solo al primo frame
                         if first_frame:
@@ -783,7 +779,9 @@ class VideoPipeline:
                                                                            target_fps=self.target_fps)
 
                                 # Visualizzazione completa
-                                fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
+                                # Ogni riga termina con \033[K per cancellare i residui del frame precedente
+                                fps_display = "\033[K\n\033[K\n" + f"{fps_stats}\n{frame_time_graph}".replace(
+                                    "\n", "\033[K\n") + "\033[K"
 
                         # Rendering frame
                         output_buffer.write(CURSOR_HOME)
@@ -797,7 +795,7 @@ class VideoPipeline:
                         output_buffer.flush()
 
                         # Tempo dopo rendering
-                        frame_end_time = time.time()
+                        frame_end_time = time.perf_counter()
 
                         # Calcola intervallo tra frame
                         if last_frame_time is not None:
