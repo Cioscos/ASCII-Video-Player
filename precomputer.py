@@ -414,6 +414,7 @@ class FramePrecomputer:
         except Exception:
             return False
 
+
 class PrecomputedFramePlayer:
     """
     Classe per la riproduzione di frame ASCII precomputati.
@@ -504,6 +505,8 @@ class PrecomputedFramePlayer:
 
         Legge i frame precomputati dal disco e li visualizza
         rispettando il timing e gestendo la sincronizzazione audio.
+        Visualizza anche statistiche di performance come un grafico
+        dei tempi di frame se richiesto.
         """
         from terminal_output_buffer import TerminalOutputBuffer
         import sys
@@ -515,9 +518,210 @@ class PrecomputedFramePlayer:
         CURSOR_HOME = '\033[H'
         CLEAR_SCREEN = '\033[2J'
 
+        # Colori ANSI
+        BOLD = '\033[1m'  # Testo in grassetto
+        RESET = '\033[0m'  # Reset stile
+        GREEN = '\033[32m'  # Testo verde
+        YELLOW = '\033[33m'  # Testo giallo
+        RED = '\033[31m'  # Testo rosso
+        BLUE = '\033[34m'  # Testo blu
+
         # Statistiche FPS
         last_frame_time = None
         frame_times = []
+        recent_frame_times = []  # Per il grafico
+        max_graph_points = 50  # Numero massimo di punti nel grafico
+        stats_update_interval = 5  # Aggiorna le statistiche ogni X frame
+
+        def create_frame_time_graph(recent_times, width=30, target_fps=None):
+            """
+            Crea un grafico ASCII che mostra l'andamento dei tempi di frame.
+
+            Visualizza i tempi di rendering con gestione intelligente degli outlier
+            e colori per indicare le performance.
+
+            Args:
+                recent_times (list): Lista di tempi di frame in secondi
+                width (int): Larghezza massima del grafico
+                target_fps (float, optional): FPS target (se disponibile)
+
+            Returns:
+                str: Grafico ASCII dei tempi di frame
+            """
+            if not recent_times or len(recent_times) < 2:
+                return "Raccolta dati per il grafico..."
+
+            # Converti in millisecondi per leggibilità
+            times_ms = [t * 1000 for t in recent_times]
+
+            # Target time in ms
+            target_time_ms = (1000 / target_fps) if target_fps else None
+
+            # Valori min/max originali
+            original_min = min(times_ms)
+            original_max = max(times_ms)
+
+            # Rilevamento outlier con MAD
+            times_sorted = sorted(times_ms)
+            median = times_sorted[len(times_sorted) // 2]
+            mad = sum(abs(x - median) for x in times_ms) / len(times_ms)
+
+            # Outlier: valori che deviano più di 3.5 MAD
+            threshold = 3.5 * mad
+            outliers = [t for t in times_ms if abs(t - median) > threshold]
+            has_outliers = len(outliers) > 0
+
+            # Filtra outlier per visualizzazione
+            filtered_times = times_ms
+            if has_outliers:
+                filtered_times = [t for t in times_ms if abs(t - median) <= threshold]
+                if not filtered_times:
+                    filtered_times = times_sorted[:int(len(times_ms) * 0.8)]
+
+            # Calcola min/max per grafico filtrato
+            min_time = min(filtered_times)
+            max_time = max(filtered_times)
+
+            # Assicura intervallo minimo
+            range_time = max_time - min_time
+            if range_time < 0.5:
+                mid_value = (max_time + min_time) / 2
+                min_time = mid_value - 0.5
+                max_time = mid_value + 0.5
+
+            # Caratteri blocchi per grafico
+            block_chars = " ▁▂▃▄▅▆▇█"
+
+            # Intestazione
+            if has_outliers:
+                header = f"{BOLD}Frame Time (ms){RESET}: min={original_min:.1f} max={original_max:.1f}"
+                if target_time_ms:
+                    header += f" target={target_time_ms:.1f}"
+                header += f" {RED}[outliers rilevati]{RESET}"
+            else:
+                header = f"{BOLD}Frame Time (ms){RESET}: min={min_time:.1f} max={max_time:.1f}"
+                if target_time_ms:
+                    header += f" target={target_time_ms:.1f}"
+
+            # Limita punti dati alla larghezza
+            if len(times_ms) > width:
+                stride = len(times_ms) // width
+                samples = [times_ms[i] for i in range(0, len(times_ms), stride)][:width]
+            else:
+                samples = times_ms[-width:]
+
+            # Genera grafico a blocchi
+            graph_line = ""
+            for time_ms in samples:
+                # Verifica se outlier
+                is_outlier = abs(time_ms - median) > threshold
+
+                if is_outlier:
+                    # Outlier: blocchi rossi
+                    graph_line += f"{RED}█{RESET}"
+                else:
+                    # Normalizza valore
+                    normalized = max(0, min(1, (time_ms - min_time) / (max_time - min_time)))
+                    block_index = min(int(normalized * (len(block_chars) - 1)), len(block_chars) - 1)
+
+                    # Colore basato su target
+                    if target_time_ms is not None:
+                        if time_ms < target_time_ms * 0.85:  # Molto veloce
+                            color = BLUE
+                        elif time_ms < target_time_ms * 1.1:  # Vicino al target
+                            color = GREEN
+                        elif time_ms < target_time_ms * 1.5:  # Leggermente lento
+                            color = YELLOW
+                        else:  # Molto lento
+                            color = RED
+                    else:
+                        color = GREEN
+
+                    # Blocco colorato
+                    graph_line += f"{color}{block_chars[block_index]}{RESET}"
+
+            # Etichette asse
+            if min_time < 10:
+                min_label = f"{min_time:.1f}ms"
+            else:
+                min_label = f"{min_time:.0f}ms"
+
+            if max_time < 10:
+                max_label = f"{max_time:.1f}ms"
+            else:
+                max_label = f"{max_time:.0f}ms"
+
+            # Allinea etichette
+            spaces = width - len(min_label) - len(max_label)
+            if spaces < 1:
+                spaces = 1
+
+            # Scala in basso
+            scale = f"{min_label}{' ' * spaces}{max_label}"
+
+            # Info outlier
+            if has_outliers and original_max > max_time:
+                scale += f" [{RED}max: {original_max:.1f}ms{RESET}]"
+
+            # Grafico completo
+            return f"{header}\n{graph_line}\n{scale}"
+
+        def create_fps_stats(frame_times, target_fps=None):
+            """
+            Genera statistiche FPS formattate per la visualizzazione.
+
+            Args:
+                frame_times (list): Lista dei tempi di frame
+                target_fps (float, optional): FPS target (se disponibile)
+
+            Returns:
+                str: Stringa formattata con statistiche FPS
+            """
+            if not frame_times:
+                return "Calcolando FPS..."
+
+            # Calcola FPS dalle ultime misurazioni
+            recent_times = frame_times[-10:]  # Ultimi 10 frame
+            avg_time = sum(recent_times) / len(recent_times)
+            current_fps = 1.0 / avg_time
+
+            # Calcola deviazione standard per stabilità
+            if len(recent_times) > 1:
+                variance = sum((t - avg_time) ** 2 for t in recent_times) / len(recent_times)
+                std_dev = variance ** 0.5
+                stability = 1 - min(1, (std_dev / avg_time))  # 0=instabile, 1=stabile
+            else:
+                stability = 1
+
+            # Colore in base al target
+            if target_fps:
+                fps_ratio = current_fps / target_fps
+                if fps_ratio > 0.95 and fps_ratio < 1.05:  # Entro 5% del target
+                    fps_color = GREEN
+                elif fps_ratio > 0.8:  # Almeno 80% del target
+                    fps_color = YELLOW
+                else:
+                    fps_color = RED
+            else:
+                fps_color = GREEN
+
+            # Barra stabilità
+            stability_bar_length = int(stability * 10)
+            stability_bar = f"[{'|' * stability_bar_length}{' ' * (10 - stability_bar_length)}]"
+
+            # Statistiche formattate
+            stats = (
+                f"{BOLD}FPS: {fps_color}{current_fps:.1f}{RESET} "
+                f"| Stabilità: {stability_bar} "
+            )
+
+            if target_fps:
+                stats += f"| Target: {target_fps} FPS "
+                stats += f"| Ratio: {current_fps / target_fps:.2f} "
+
+            stats += f"| Frame {self.current_frame}/{self.total_frames}"
+
+            return stats
 
         try:
             # Pulisci lo schermo all'inizio
@@ -554,22 +758,46 @@ class PrecomputedFramePlayer:
                 output_buffer.write(CURSOR_HOME)
                 output_buffer.write(ascii_frame)
 
-                # Aggiungi statistiche FPS se richiesto
-                if self.log_fps and last_frame_time is not None:
-                    fps = 1.0 / (frame_start_time - last_frame_time)
-                    frame_times.append(frame_start_time - last_frame_time)
-                    if len(frame_times) > 30:
+                # Calcola tempo corrente
+                current_time = time.time()
+
+                # Calcola e registra il frame time se non è il primo frame
+                if last_frame_time is not None:
+                    frame_interval = current_time - last_frame_time
+                    frame_times.append(frame_interval)
+                    if len(frame_times) > 100:
                         frame_times.pop(0)
-                    avg_fps = 1.0 / (sum(frame_times) / len(frame_times))
-                    output_buffer.write(f"\n\nFPS: {avg_fps:.1f}")
+
+                    # Aggiorna buffer grafico
+                    recent_frame_times.append(frame_interval)
+                    if len(recent_frame_times) > max_graph_points:
+                        recent_frame_times.pop(0)
+
+                # Aggiungi statistiche FPS e grafico se richiesto
+                if self.log_fps and self.current_frame % stats_update_interval == 0:
+                    fps_stats = ""
+                    if frame_times:
+                        # Statistiche FPS
+                        fps_stats = create_fps_stats(frame_times, self.target_fps)
+
+                        # Grafico tempi frame
+                        frame_time_graph = create_frame_time_graph(
+                            recent_frame_times,
+                            width=50,
+                            target_fps=self.target_fps
+                        )
+
+                        # Visualizzazione completa
+                        fps_display = f"\n\n{fps_stats}\n{frame_time_graph}"
+                        output_buffer.write(fps_display)
 
                 output_buffer.flush()
 
                 # Aggiorna timestamp per statistiche
-                last_frame_time = frame_start_time
+                last_frame_time = current_time
 
                 # Calcola tempo di elaborazione e attendi se necessario
-                process_time = time.time() - frame_start_time
+                process_time = time.time() - current_time
                 sleep_time = frame_duration - process_time
 
                 if sleep_time > 0:
