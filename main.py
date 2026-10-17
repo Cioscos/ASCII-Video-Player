@@ -15,6 +15,8 @@ from utils import setup_logging, get_terminal_size
 HIDE_CURSOR = '\033[?25l'
 # Ripristino colori e cursore (come TerminalDisplay.restore, idempotente)
 RESET_AND_SHOW_CURSOR = '\033[0m\033[?25h'
+# Pulizia schermo e cursore in alto a sinistra
+CLEAR_SCREEN = '[2J[H'
 
 # Palette 'extended' (67 caratteri), esposta a livello di modulo per i test
 EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
@@ -571,7 +573,7 @@ def run_menu():
     settings, message = load_settings()
     state = MenuState(settings, list_videos())
     state.message = message
-    state._refresh_caches()
+    state.refresh()
     try:
         while True:
             action = None
@@ -580,7 +582,7 @@ def run_menu():
                 while action is None:
                     if redraw:
                         cols, rows = get_terminal_size()
-                        sys.stdout.write("[2J[H" + render_menu(state, cols, rows))
+                        sys.stdout.write(CLEAR_SCREEN + render_menu(state, cols, rows))
                         sys.stdout.flush()
                         redraw = False
                     key = keys.read(0.1)
@@ -594,10 +596,11 @@ def run_menu():
                 save_settings(state.settings, state.settings_path)
             except OSError as e:
                 state.message = f"Impossibile salvare le impostazioni: {e}"
-            sys.stdout.write("[2J[H")
+            sys.stdout.write(CLEAR_SCREEN)
             sys.stdout.flush()
             try:
-                play(parse_arguments(state.settings.to_argv()))
+                if play(parse_arguments(state.settings.to_argv())) != 0:
+                    state.message = "Riproduzione terminata con errori (vedi logs/)"
             except KeyboardInterrupt:
                 pass
             except Exception as e:
@@ -606,13 +609,13 @@ def run_menu():
             except SystemExit:
                 # argparse che rifiuta i valori salvati
                 state.message = "Impostazioni non valide per la riproduzione"
+            _reset_app_logging()
             state.screen, state.selected = "main", 0
-            state.videos = list_videos()
-            state._refresh_caches()
+            state.refresh()
     except KeyboardInterrupt:
         return 0
     finally:
-        sys.stdout.write(RESET_AND_SHOW_CURSOR + "[2J[H")
+        sys.stdout.write(RESET_AND_SHOW_CURSOR + CLEAR_SCREEN)
         sys.stdout.flush()
 
 

@@ -76,7 +76,7 @@ def test_cli_args_go_to_play(monkeypatch):
     assert main.main(["v.mp4", "80"]) == 0 and calls[0].width == 80
 
 
-def test_menu_play_then_quit(monkeypatch, tmp_path):
+def _run_menu_with_keys(monkeypatch, tmp_path, key_list, play):
     import json
     import keyboard_input
     import menu
@@ -87,8 +87,7 @@ def test_menu_play_then_quit(monkeypatch, tmp_path):
     video.write_bytes(b"x")
     settings = menu.Settings(video_path=str(video))
     (tmp_path / "settings.json").write_text(json.dumps(settings.__dict__), encoding="utf-8")
-
-    keys = iter(["enter", "esc"])
+    keys = iter(key_list)
 
     class FakeKeyReader:
         def __enter__(self):
@@ -102,8 +101,44 @@ def test_menu_play_then_quit(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(keyboard_input, "KeyReader", FakeKeyReader)
-    calls = []
-    monkeypatch.setattr(main, "play", lambda a: calls.append(a) or 0)
+    monkeypatch.setattr(main, "play", play)
+    return settings, video
+
+
+def test_menu_play_then_quit(monkeypatch, tmp_path):
+    import menu
+    events = []
+    settings, video = _run_menu_with_keys(monkeypatch, tmp_path, ["enter", "esc"],
+                                          lambda a: events.append(("play", a)) or 0)
+    real_save = menu.save_settings
+    monkeypatch.setattr(menu, "save_settings",
+                        lambda s, path: (events.append(("save", s)), real_save(s, path))[1])
     assert main.main([]) == 0
-    assert len(calls) == 1 and calls[0].video_path == str(video)
-    assert (tmp_path / "settings.json").exists()
+    assert [e[0] for e in events] == ["save", "play"]
+    assert events[0][1] == settings
+    assert events[1][1] == main.parse_arguments(settings.to_argv())
+
+
+def test_menu_play_error_code_sets_message(monkeypatch, tmp_path, capsys):
+    _run_menu_with_keys(monkeypatch, tmp_path, ["enter", "esc"], lambda a: 1)
+    assert main.main([]) == 0
+    assert "Riproduzione terminata con errori" in capsys.readouterr().out
+
+
+def test_menu_play_exception_sets_message(monkeypatch, tmp_path, capsys):
+    def boom(a):
+        raise RuntimeError("guasto")
+    _run_menu_with_keys(monkeypatch, tmp_path, ["enter", "esc"], boom)
+    assert main.main([]) == 0
+    assert "guasto" in capsys.readouterr().out
+
+
+def test_menu_keyboard_interrupt_in_play_returns_to_menu(monkeypatch, tmp_path):
+    calls = []
+
+    def interrupted(a):
+        calls.append(a)
+        raise KeyboardInterrupt
+    _run_menu_with_keys(monkeypatch, tmp_path, ["enter", "esc"], interrupted)
+    assert main.main([]) == 0
+    assert len(calls) == 1

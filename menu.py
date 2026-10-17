@@ -334,6 +334,11 @@ class MenuState:
         self.confirm_paths = paths
         self.screen = "confirm"
 
+    def refresh(self) -> None:
+        """Rilegge l'elenco dei video e delle cache."""
+        self.videos = list_videos()
+        self._refresh_caches()
+
     def _refresh_caches(self) -> None:
         self.caches = list_caches(self.cache_root)
 
