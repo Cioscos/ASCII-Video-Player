@@ -47,3 +47,22 @@ def test_seek_past_audio_end_outputs_silence():
     out = np.zeros((3, 2), np.float32)
     p._audio_callback(out, 3, None, None)
     assert out[:, 0].tolist() == [1, 2, 3]
+
+
+def test_paused_outputs_silence_without_advancing():
+    p = AudioPlayer("x"); p.load_array(np.ones((100, 2)), 10); p.audio_time = 2.0; p.set_paused(True)
+    out = np.full((4, 2), 9, np.float32); p._audio_callback(out, 4, None, None)
+    assert not out.any() and p.audio_time == pytest.approx(2.0)
+    p.set_paused(False); p._audio_callback(out, 4, None, None); assert out.all() and p.audio_time == pytest.approx(2.4)
+
+
+def test_seek_below_tolerance_is_applied():
+    p = AudioPlayer("x"); p.load_array(np.arange(100.0).reshape(100, 1).repeat(2, 1), 10); p.audio_time = 5.0
+    p.seek(5.05); out = np.zeros((1, 2), np.float32); p._audio_callback(out, 1, None, None)
+    assert p.audio_time == pytest.approx(5.15)
+
+
+def test_seek_while_paused_is_applied_without_advancing():
+    p = AudioPlayer("x"); p.load_array(np.ones((100, 2)), 10); p.audio_time = 2.0; p.set_paused(True)
+    p.seek(7.0); out = np.full((4, 2), 9, np.float32); p._audio_callback(out, 4, None, None)
+    assert not out.any() and p.audio_time == pytest.approx(7.0)

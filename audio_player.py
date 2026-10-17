@@ -18,6 +18,7 @@ class AudioPlayer:
         should_stop (threading.Event): Flag per la terminazione
         audio_thread (threading.Thread): Thread per la riproduzione dell'audio
         _pending_seek (float | None): Risincronizzazione pendente, applicata dal callback
+        _paused (bool): In pausa il callback emette silenzio senza avanzare audio_time
         underflows (int): Numero di callback con status non vuoto (underflow/overflow)
         audio_time (float): Tempo corrente di riproduzione audio in secondi
         video_time (float): Tempo corrente di riproduzione video in secondi
@@ -40,6 +41,7 @@ class AudioPlayer:
         self.should_stop = threading.Event()
         self.audio_thread = None
         self._pending_seek = None
+        self._paused = False
         self.underflows = 0
         self.audio_time = 0.0
         self.video_time = 0.0
@@ -145,6 +147,11 @@ class AudioPlayer:
             self._pending_seek = None
             self.audio_time = seek
 
+        if self._paused:
+            # In pausa: silenzio e audio_time fermo (il seek pendente resta applicato).
+            outdata.fill(0)
+            return
+
         if self.audio_time * self.samplerate >= total:
             # Video oltre la fine dell'audio (audio più corto): silenzio, senza
             # ripartire dall'inizio, finché un seek non torna sotto la durata.
@@ -226,6 +233,28 @@ class AudioPlayer:
         # Richiede una risincronizzazione (applicata dal callback) se la differenza è significativa
         if abs(self.audio_time - self.video_time) > self.sync_tolerance:
             self._pending_seek = current_time
+
+    def set_paused(self, paused):
+        """
+        Mette in pausa o riprende l'audio.
+
+        Il flag è letto dal callback sul thread audio (assegnazione atomica,
+        come per _pending_seek): in pausa il callback emette silenzio.
+
+        Args:
+            paused (bool): True per mettere in pausa, False per riprendere
+        """
+        self._paused = bool(paused)
+
+    def seek(self, t):
+        """
+        Sposta subito l'audio al tempo indicato, anche sotto sync_tolerance.
+
+        Args:
+            t (float): Tempo di destinazione in secondi
+        """
+        self.video_time = t
+        self._pending_seek = t
 
     def stop(self):
         """
