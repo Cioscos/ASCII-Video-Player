@@ -27,3 +27,15 @@ def test_two_color_rows_emit_two_escapes():
     f = np.zeros((4, 40, 3), np.uint8)
     f[:, 20:] = 255
     assert AsciiConverter(40, 4, "@").convert(f).count(b"[38;5;") == 8
+
+
+def test_long_custom_palette_matches_reference(random_frame):
+    palette = "".join(chr(0x100 + i) for i in range(300))  # oltre 255 caratteri
+    h = compute_ascii_height(160, 90, 120)
+    out = AsciiConverter(120, h, palette).convert_frame(random_frame)
+    assert parse_ansi_grid(out.decode("utf-8")) == reference_grid(random_frame, 120, palette)
+
+
+def test_empty_palette_raises():
+    with pytest.raises(ValueError):
+        AsciiConverter(10, 2, "")

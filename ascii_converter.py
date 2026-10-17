@@ -22,7 +22,10 @@ class AsciiConverter:
         self.palette = palette
         chars = [_BLOCK_CHAR] if palette == 'box' else list(palette)
         n = len(chars)
-        self.char_lut = np.array([int(g / 255.0 * (n - 1)) for g in range(256)], dtype=np.uint8)
+        if n == 0:
+            raise ValueError("La palette non puo' essere vuota")
+        # intp: le palette custom possono superare 255 caratteri
+        self.char_lut = np.array([int(g / 255.0 * (n - 1)) for g in range(256)], dtype=np.intp)
         self.full_tok = np.empty((216, n), dtype=object)
         for color in range(16, 232):
             for k, ch in enumerate(chars):
