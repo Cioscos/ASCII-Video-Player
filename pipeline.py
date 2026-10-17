@@ -211,7 +211,7 @@ class _PipelineFrameSource:
                 try:
                     item = p.ascii_queue.get(timeout=0.5)
                 except queue.Empty:
-                    p.logger.error("Processo di conversione terminato inaspettatamente")
+                    p.logger.error("Pipeline interrotta: un processo è terminato inaspettatamente")
                     p.should_stop.set()
                     return None
             if isinstance(item, str) and item == END_OF_VIDEO_MARKER:
@@ -300,8 +300,19 @@ class VideoPipeline:
         return _PipelineFrameSource(self)
 
     def workers_alive(self):
-        """True se il processo di conversione è ancora in esecuzione."""
-        return self.converter_process is not None and self.converter_process.is_alive()
+        """
+        True se la pipeline può ancora produrre frame.
+
+        Falso se il converter non è in esecuzione oppure se il reader è terminato
+        in modo anomalo (exitcode diverso da 0; 0 è l'uscita normale senza loop).
+        """
+        if self.converter_process is None or not self.converter_process.is_alive():
+            return False
+        reader_exit = self.reader_process.exitcode if self.reader_process is not None else None
+        if reader_exit not in (None, 0):
+            self.logger.error(f"Processo di lettura terminato in modo anomalo (exitcode {reader_exit})")
+            return False
+        return True
 
     def stop(self, timeout=1.0):
         """Ferma i processi e svuota le code (idempotente)."""
