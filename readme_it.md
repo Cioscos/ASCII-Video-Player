@@ -11,7 +11,10 @@
 - **Riproduzione video in ASCII art** nel terminale con supporto a colori
 - **Pipeline di elaborazione parallela** per prestazioni ottimali
 - **Sincronizzazione audio-video**: l'audio segue l'orologio del video e si risincronizza sul tempo video corrente quando si discosta
-- **Multiple palette di caratteri ASCII** (basic, standard, extended, box o custom)
+- **Multiple palette di caratteri ASCII** (basic, standard, extended, box, half o custom)
+- **Menu interattivo** (`python main.py` senza argomenti), impostazioni persistenti e gestione della cache
+- **Truecolor a 24 bit** (`--truecolor`) e larghezza automatica dalla dimensione del terminale
+- **Controlli di riproduzione**: pausa, uscita e seek (con `--high-performance`)
 - **Sistema di calibrazione automatico** per adattarsi alle dimensioni del terminale
 - **Monitoraggio performance in tempo reale** con visualizzazione grafica degli FPS
 - **Temporizzazione a scadenze assolute**: ogni frame ha una scadenza fissa; i frame vengono saltati solo quando il disegno resta indietro, così la riproduzione mantiene il ritmo anche su hardware meno potenti
@@ -53,12 +56,38 @@
 La sintassi base è:
 
 ```bash
-python main.py <video_path> <width> [opzioni]
+python main.py <video_path> [width] [opzioni]
 ```
 
 Dove:
 - `<video_path>`: percorso al file video da riprodurre
-- `<width>`: larghezza dell'output ASCII (in caratteri)
+- `[width]`: larghezza dell'output ASCII (in caratteri). Facoltativa: se omessa viene calcolata dalla dimensione del terminale, riservando 2 righe (6 con `--log_fps`)
+
+Senza argomenti, `python main.py` apre il menu interattivo (serve un terminale interattivo; altrimenti viene stampato l'uso e il codice di uscita è 1).
+
+### Menu interattivo
+
+Il menu ha cinque schermate: **Riproduci** (riproduce il video selezionato), **Video** (sceglie un file da `videos/` - `.mp4 .mov .avi .mkv .webm` - oppure si digita un percorso), **Impostazioni**, **Cache** ed **Esci**. Le impostazioni vengono salvate in `settings.json` (file locale, ignorato da git) quando si esce dalla schermata Impostazioni con Esc.
+
+| Tasto | Azione |
+|-------|--------|
+| `Su` / `Giù` | Sposta la selezione |
+| `Invio` | Seleziona / modifica la voce evidenziata |
+| `Sinistra` / `Destra` | Cambia il valore nella schermata Impostazioni (palette, FPS, opzioni on/off) |
+| `Esc` | Torna indietro (esce dalla schermata principale; salva nelle Impostazioni) |
+| `Invio` (schermata Cache) | Cancella la cache selezionata, dopo conferma (`s` sì / `n` no) |
+| `o` (schermata Cache) | Cancella tutte le cache obsolete, dopo conferma |
+
+### Tasti durante la riproduzione
+
+| Tasto | Azione |
+|-------|--------|
+| `Spazio` | Pausa / riprendi |
+| `q` o `Esc` | Esci |
+| `Sinistra` / `Destra` | Seek -5 s / +5 s |
+| `Giù` / `Su` | Seek -30 s / +30 s |
+
+Il seek è disponibile solo con `--high-performance`; in modalità standard il player mostra "Seek disponibile solo con --high-performance".
 
 ### Esempi
 
@@ -89,8 +118,10 @@ python main.py mio_video.mp4 80 --palette extended --log_fps --log_performance
 | `--verbose` | Mostra messaggi di log dettagliati nel terminale |
 | `--batch_size N` | Dimensione del batch per l'elaborazione dei frame in modalità standard (default: 1) |
 | `--high-performance` | Pre-converte l'intero video in una cache binaria su disco e lo riproduce da lì (vedi sotto) |
-| `--palette TYPE` | Scelta della palette caratteri: "basic", "standard" (default), "extended", "box" o "custom" |
+| `--palette TYPE` | Scelta della palette caratteri: "basic", "standard" (default), "extended", "box", "half" o "custom" |
 | `--custom-palette FILE` | File con caratteri personalizzati quando palette="custom" |
+| `--truecolor` | Usa colori a 24 bit invece della palette a 256 colori (il terminale deve supportarli; output più grande) |
+| `--cache-limit SIZE` | Dimensione massima di `cached_frames/` (suffissi `K`, `M`, `G`, base 1024; default `2G`, `0` = nessun limite). Al superamento vengono cancellate le cache usate meno di recente (mai quella in uso). Un valore non valido termina con codice 1 |
 
 ## 🏗️ Architettura
 
@@ -112,12 +143,19 @@ python main.py mio_video.mp4 300 --fps 60 --palette extended --high-performance
 
 La cache si trova in `cached_frames/<video>_<hash>/` (`frames.bin`, `index.npy`, `metadata.json`). L'hash comprende percorso, dimensione e data di modifica del video, larghezza, altezza, FPS effettivi, palette e versione del convertitore: cambiare uno di questi valori crea una nuova cache. Se la pre-elaborazione fallisce, il player ripiega sulla modalità standard. Un Ctrl+C durante la pre-elaborazione non lascia cache parziali utilizzabili.
 
-**Le cache create da versioni precedenti (`frame_*.txt` + `metadata.pkl`) vengono ignorate: cancella a mano le vecchie sottocartelle di `cached_frames/`.**
+Anche il flag `--truecolor` fa parte dell'hash. **Con la versione 3 del convertitore (mezzi blocchi e truecolor) tutte le cache create da versioni precedenti vengono rigenerate al primo utilizzo e compaiono come obsolete nella schermata Cache del menu.** Le cache di versioni molto vecchie (`frame_*.txt` + `metadata.pkl`) vengono comunque ignorate e si possono cancellare a mano.
+
+### Gestione della cache
+
+`cached_frames/` viene mantenuta entro la dimensione di `--cache-limit` (default 2G) cancellando le cache usate meno di recente (in base alla data di modifica di `metadata.json`); la cache in riproduzione non viene mai cancellata. La schermata **Cache** del menu elenca ogni cache con nome del video e dimensione e permette di cancellarne una (`Invio`) o tutte quelle obsolete (`o`). Una cache è obsoleta se il suo `metadata.json` manca o non è valido, oppure se è stata creata da una versione precedente del convertitore.
 
 ### Struttura del codice
 
 - `main.py`: Punto di ingresso dell'applicazione, gestione degli argomenti CLI, palette
-- `ascii_converter.py`: Conversione vettorizzata da frame ad ASCII colorato (run-length dei colori, output in byte)
+- `ascii_converter.py`: Conversione vettorizzata da frame ad ASCII colorato (run-length dei colori, output in byte); `make_converter` sceglie il convertitore giusto (caratteri, mezzi blocchi, varianti truecolor)
+- `keyboard_input.py`: Lettura non bloccante della tastiera (`msvcrt` su Windows, `termios`/`select` su POSIX)
+- `menu.py`: Menu interattivo (`Settings`, `MenuState`, `render_menu`)
+- `cache_manager.py`: Elenco, cancellazione e limite di dimensione delle cache
 - `terminal_display.py`: Output su terminale con aggiornamento per riga (delta)
 - `playback.py`: `FrameDecimator`, `PlaybackClock` e ciclo `run_playback`
 - `fps_stats.py`: Statistiche e grafico degli FPS
@@ -164,6 +202,7 @@ Quando l'opzione `--log_fps` è attivata, viene visualizzato un grafico in tempo
 - **Standard**: 42 caratteri, più dettagliata (default)
 - **Extended**: 67 caratteri, massimo dettaglio
 - **Box**: Utilizza blocchi Unicode colorati per la massima densità visiva
+- **Half**: Usa mezzi blocchi con un colore diverso per il pixel superiore e inferiore, raddoppiando la risoluzione verticale
 - **Custom**: Definita dall'utente tramite file di testo
 
 ## 📄 Licenza

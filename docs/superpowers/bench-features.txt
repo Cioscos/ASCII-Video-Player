@@ -1,0 +1,30 @@
+video=videos/5.mp4 width=300 palette=extended truecolor=False frames=300
+decode+resize ms/frame: 2.34
+convert ms/frame: 1.19
+bytes/frame: 82489
+precompute frame/s: 301.9
+video=videos/5.mp4 width=300 palette=extended truecolor=True frames=300
+decode+resize ms/frame: 2.37
+convert ms/frame: 3.89
+bytes/frame: 308074
+precompute frame/s: 281.9
+video=videos/5.mp4 width=300 palette=box truecolor=False frames=300
+decode+resize ms/frame: 2.40
+convert ms/frame: 1.07
+bytes/frame: 127489
+precompute frame/s: 301.5
+video=videos/5.mp4 width=300 palette=box truecolor=True frames=300
+decode+resize ms/frame: 2.35
+convert ms/frame: 3.78
+bytes/frame: 353074
+precompute frame/s: 282.8
+video=videos/5.mp4 width=300 palette=half truecolor=False frames=300
+decode+resize ms/frame: 2.36
+convert ms/frame: 1.30
+bytes/frame: 224831
+precompute frame/s: 285.8
+video=videos/5.mp4 width=300 palette=half truecolor=True frames=300
+decode+resize ms/frame: 2.39
+convert ms/frame: 7.32
+bytes/frame: 670723
+precompute frame/s: 254.1
