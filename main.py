@@ -13,6 +13,9 @@ from utils import setup_logging, get_terminal_size
 HIDE_CURSOR = '\033[?25l'
 SHOW_CURSOR = '\033[?25h'
 
+# Palette 'extended' (70 caratteri), esposta a livello di modulo per i test
+EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+
 
 def parse_arguments():
     """
@@ -165,7 +168,7 @@ def get_ascii_palette(args, logger):
         palette_map = {
             "basic": " .:-=+*#%@",
             "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
-            "extended": " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+            "extended": EXTENDED
         }
         ascii_palette = palette_map[args.palette]
         logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
