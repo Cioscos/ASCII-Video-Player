@@ -9,12 +9,14 @@ import multiprocessing
 END_OF_VIDEO_MARKER = "END_OF_VIDEO"
 
 
-def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size, loop_video=True):
+def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch_size, loop_video=True,
+                         source_fps=None):
     """
     Processo dedicato alla lettura dei frame dal video.
 
-    Estrae frame dal video a una velocità controllata e li invia alla coda
-    per la conversione. Gestisce anche il loop del video se richiesto.
+    Legge i frame del video, scarta quelli in eccesso rispetto agli FPS richiesti
+    (FrameDecimator) e li invia alla coda per la conversione. La cadenza è data
+    dal renderer; la backpressure della coda limita la lettura. Gestisce anche il loop del video se richiesto.
 
     Args:
         video_path (str): Percorso del file video
@@ -23,7 +25,9 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
         target_fps (int): FPS target per l'estrazione dei frame
         batch_size (int): Numero di frame da processare in batch
         loop_video (bool): Se True, riavvia il video quando raggiunge la fine
+        source_fps (float): FPS del video sorgente (se None, letti dal video)
     """
+    from playback import FrameDecimator
     # Configura logging locale per questo processo
     from utils import configure_process_logging
     logger = configure_process_logging("Reader", console_level=logging.WARNING)
@@ -41,25 +45,15 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
         total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
         logger.info(f"Video aperto: {video_path}, FPS: {original_fps}, Frames totali: {total_frames}")
 
-        # Calcola il ritardo necessario per rispettare il target FPS
-        if target_fps and target_fps < original_fps:
-            frame_delay = 1.0 / target_fps
-        else:
-            frame_delay = 1.0 / original_fps
+        # Decide quali frame sorgente tenere per ottenere gli FPS richiesti
+        decimator = FrameDecimator(source_fps if source_fps is not None else original_fps, target_fps)
 
         # Leggi i frame in batch
         batch = []
-        last_read_time = time.time()
         frame_count = 0
+        source_index = 0
 
         while not should_stop.is_set():
-            if target_fps:
-                # Rispetta il target FPS
-                current_time = time.time()
-                elapsed = current_time - last_read_time
-                if elapsed < frame_delay:
-                    time.sleep(frame_delay - elapsed)
-
             # Leggi il frame
             success, frame = video.read()
             if not success:
@@ -87,6 +81,13 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                 logger.info("Riavvio del video...")
                 video.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 batch = []
+                source_index = 0
+                continue
+
+            # Scarta i frame in eccesso rispetto agli FPS effettivi
+            keep = decimator.should_keep(source_index)
+            source_index += 1
+            if not keep:
                 continue
 
             batch.append(frame)
@@ -97,7 +98,6 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                 try:
                     frame_queue.put(batch, block=True, timeout=1)
                     batch = []
-                    last_read_time = time.time()
                 except queue.Full:
                     # Gestione adattiva di code piene
                     time.sleep(0.1)
@@ -105,7 +105,6 @@ def frame_reader_process(video_path, frame_queue, should_stop, target_fps, batch
                     try:
                         frame_queue.put(reduced_batch, block=False)
                         batch = batch[batch_size // 2:]
-                        last_read_time = time.time()
                     except queue.Full:
                         # Salta alcuni frame se la coda è ancora piena
                         batch = batch[1:]
@@ -410,7 +409,7 @@ class VideoPipeline:
 
     def __init__(self, video_path, width, target_fps=None, batch_size=1,
                  log_performance=False, log_fps=False, ascii_palette=None, loop_video=True,
-                 enable_audio=False):
+                 enable_audio=False, source_fps=None):
         """
         Inizializza la pipeline video.
 
@@ -424,10 +423,15 @@ class VideoPipeline:
             ascii_palette (str, optional): Stringa di caratteri ASCII da usare per la conversione
             loop_video (bool): Se True, riavvia il video quando raggiunge la fine
             enable_audio (bool): Se True, riproduce l'audio del video
+            source_fps (float): FPS del video sorgente, per la decimazione dei frame
         """
+        from playback import FrameDecimator
         self.video_path = video_path
         self.width = width
-        self.target_fps = target_fps
+        self.requested_fps = target_fps
+        self.source_fps = source_fps
+        # FPS reali di riproduzione (mai sopra quelli sorgente): usati da renderer e audio
+        self.target_fps = FrameDecimator(source_fps, target_fps).effective_fps if source_fps is not None else target_fps
         self.batch_size = batch_size
         self.log_performance = log_performance
         self.log_fps = log_fps
@@ -868,8 +872,8 @@ class VideoPipeline:
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
             args=(
-                self.video_path, self.frame_queue, self.should_stop, self.target_fps,
-                self.batch_size, self.loop_video
+                self.video_path, self.frame_queue, self.should_stop, self.requested_fps,
+                self.batch_size, self.loop_video, self.source_fps
             ),
             daemon=True
         )

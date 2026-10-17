@@ -222,7 +222,7 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
     # Inizializza player
     player = PrecomputedFramePlayer(
         metadata,
-        args.fps,
+        metadata["target_fps"],
         not args.no_loop,
         args.audio,
         args.log_fps
@@ -288,7 +288,8 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
         args.log_fps,
         ascii_palette=ascii_palette,
         loop_video=not args.no_loop,
-        enable_audio=args.audio
+        enable_audio=args.audio,
+        source_fps=video_info[1]
     )
 
     # Gestione segnali

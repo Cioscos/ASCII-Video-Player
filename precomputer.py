@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 
@@ -83,17 +84,11 @@ class FramePrecomputer:
         # Calcola durata
         duration = frame_count / fps if fps > 0 else 0
 
-        # FPS target effettivo
-        target_fps = self.target_fps or fps
-
-        # Numero effettivo di frame da estrarre
-        if self.target_fps and self.target_fps < fps:
-            # Se il target FPS è inferiore, estraiamo meno frame
-            frame_step = fps / target_fps
-            actual_frames = int(frame_count / frame_step)
-        else:
-            frame_step = 1
-            actual_frames = frame_count
+        # FPS effettivi di riproduzione (mai sopra quelli sorgente) e frame da estrarre
+        from playback import FrameDecimator
+        decimator = FrameDecimator(fps, self.target_fps)
+        target_fps = decimator.effective_fps
+        actual_frames = math.ceil(frame_count * decimator.ratio)
 
         cap.release()
 
@@ -102,7 +97,6 @@ class FramePrecomputer:
             "target_fps": target_fps,
             "frame_count": frame_count,
             "actual_frames": actual_frames,
-            "frame_step": frame_step,
             "width": width,
             "height": height,
             "duration": duration,
@@ -328,6 +322,8 @@ class FramePrecomputer:
         try:
             # Setup barra di progresso
             with tqdm(total=video_info["actual_frames"], desc="Pre-elaborazione frame") as pbar:
+                from playback import FrameDecimator
+                decimator = FrameDecimator(video_info["original_fps"], self.target_fps)
                 frame_idx = 0
                 processed_count = 0
 
@@ -338,8 +334,8 @@ class FramePrecomputer:
                     if not ret:
                         break
 
-                    # Se abbiamo un frame step, verifica se questo frame va processato
-                    if frame_idx % video_info["frame_step"] < 1:
+                    # Verifica se questo frame va tenuto per gli FPS effettivi
+                    if decimator.should_keep(frame_idx):
                         # Aggiungi il frame alla coda
                         frame_queue.put((processed_count, frame))
                         processed_count += 1
@@ -393,9 +389,13 @@ class FramePrecomputer:
 
             # Verifica che i parametri corrispondano
             if (metadata.get("video_path") != self.video_path or
-                    metadata.get("ascii_width") != self.width or
-                    (self.target_fps and metadata.get("target_fps") != self.target_fps)):
+                    metadata.get("ascii_width") != self.width):
                 return False
+            if self.target_fps:
+                from playback import FrameDecimator
+                expected_fps = FrameDecimator(metadata.get("original_fps"), self.target_fps).effective_fps
+                if metadata.get("target_fps") != expected_fps:
+                    return False
 
             # Verifica che esistano i file dei frame
             frame_count = metadata.get("processed_frames", 0)
