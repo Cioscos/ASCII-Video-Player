@@ -87,7 +87,7 @@ def parse_arguments(argv=None):
                         default="standard",
                         help="Palette: basic (10 caratteri), standard (42), extended (67), box (blocchi colorati), half (mezzi blocchi, doppia risoluzione verticale), custom (da --custom-palette)")
     parser.add_argument("--custom-palette", type=str,
-                        help="Path to a custom palette file. It can be a normal .txt file.")
+                        help="Percorso di un file palette custom (anche un normale .txt)")
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
     parser.add_argument("--truecolor", action="store_true",
                         help="Usa colori a 24 bit invece della palette a 256 colori")
@@ -318,7 +318,7 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
     with _open_controls() as keys:
         try:
             print("\nASCII Video Player avviato in modalità high-performance!")
-            print("Premi Ctrl+C per terminare\n")
+            print(CONTROLS_HINT_HP + "\n")
             if not args.no_loop:
                 print("Il video si ripeterà automaticamente alla fine")
             else:
@@ -450,7 +450,7 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
             pipeline.start()
 
             print("\nASCII Video Player avviato!")
-            print("Premi Ctrl+C per terminare\n")
+            print(CONTROLS_HINT + "\n")
             if not args.no_loop:
                 print("Il video si ripeterà automaticamente alla fine")
             else:

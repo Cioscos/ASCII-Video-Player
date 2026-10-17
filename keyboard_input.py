@@ -83,7 +83,10 @@ class KeyReader:
                 self._fd = self._stream.fileno()
                 self._old_attrs = termios.tcgetattr(self._fd)
                 tty.setcbreak(self._fd)
-                termios.tcflush(self._fd, termios.TCIFLUSH)  # scarta i tasti gia' digitati
+                try:
+                    termios.tcflush(self._fd, termios.TCIFLUSH)  # scarta i tasti gia' digitati
+                except Exception:
+                    pass  # il terminale va comunque ripristinato in __exit__
             except Exception:
                 self._old_attrs = None
                 self.active = False
