@@ -116,3 +116,32 @@ def test_overlay_every_five_drawn_frames():
     with_overlay = [i for i, o in enumerate(d.overlays) if o]
     assert with_overlay == [0, 5]
     assert "Frame 5" in d.overlays[5][0]
+
+
+class SlowSource(ListSource):
+    """Sorgente lenta: ogni estrazione consuma tempo finto."""
+
+    def __init__(self, frames, ft, cost):
+        super().__init__(frames)
+        self.ft = ft
+        self.cost = cost
+
+    def next_frame(self):
+        self.ft.advance(self.cost)
+        return super().next_frame()
+
+
+def test_slow_source_draws_every_frame():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    run_playback(SlowSource(make(10), ft, 0.15), 10, d, threading.Event(), loop=False,
+                 clock=make_clock(10, ft))
+    assert d.drawn == list(range(10))
+
+
+def test_single_frame_loop_bounded_by_stop():
+    ft = FakeTime()
+    stop = threading.Event()
+    d = RecordingDisplay(on_show=lambda k: stop.set() if k == 7 else None)
+    run_playback(ListSource(make(1)), 10, d, stop, loop=True, clock=make_clock(10, ft))
+    assert d.drawn == [0] * 7

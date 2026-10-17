@@ -126,7 +126,9 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     got_frame = False  # almeno un frame ottenuto dall'ultimo avvio/restart
 
     while not should_stop.is_set():
+        fetch_start = clock.now()
         item = source.next_frame()
+        fetch_time = clock.now() - fetch_start
         if item is None:
             if not loop or not got_frame:
                 break  # fine video, oppure sorgente vuota dopo il restart
@@ -137,7 +139,11 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
         index, frame = item
 
         late = clock.lateness(n)
-        if late >= 1.0:
+        if fetch_time > frame_time:
+            # Ritardo dovuto alla sorgente lenta: si riancora, senza saltare
+            clock.rebase(n)
+            logger.debug("Sorgente lenta (%.3fs): orologio riancorato al frame %d", fetch_time, n)
+        elif late >= 1.0:
             clock.rebase(n)
             logger.debug("Stallo di %.2fs: orologio riancorato al frame %d", late, n)
         elif late > frame_time:
