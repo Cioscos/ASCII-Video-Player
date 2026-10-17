@@ -7,6 +7,7 @@ import threading
 import cv2
 
 from ascii_converter import auto_width, compute_ascii_height
+from cache_manager import DEFAULT_LIMIT, enforce_limit, parse_size
 from calibration_frame import render_calibration_frame
 from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
@@ -80,6 +81,8 @@ def parse_arguments():
     parser.add_argument("--truecolor", action="store_true",
                         help="Use 24-bit colors instead of the 256-color palette")
     parser.add_argument("--audio", action="store_true", help="Enable audio playback")
+    parser.add_argument("--cache-limit", type=str, default=DEFAULT_LIMIT,
+                        help=f"Limite di spazio per cached_frames, es. 500M, 2G (0 = nessun limite, default: {DEFAULT_LIMIT})")
 
     return parser.parse_args()
 
@@ -266,6 +269,10 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
             logger.error("Pre-elaborazione non riuscita, utilizzo modalità standard")
             return run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
 
+    # Applica il limite di spazio, preservando la cache appena usata
+    for removed in enforce_limit("cached_frames", parse_size(args.cache_limit), keep={cache_dir}):
+        logger.info(f"Cache rimossa per il limite di spazio: {removed}")
+
     fps = cached.metadata["effective_fps"]
     stats = FpsStats(fps) if args.log_fps else None
     audio = None
@@ -441,6 +448,13 @@ def main():
     """
     # Parse degli argomenti
     args = parse_arguments()
+
+    # Verifica limite di cache
+    try:
+        parse_size(args.cache_limit)
+    except ValueError:
+        print(f"Errore: valore non valido per --cache-limit: '{args.cache_limit}' (esempi: 500M, 2G, 0)")
+        return 1
 
     # Verifica file video
     if not os.path.isfile(args.video_path):

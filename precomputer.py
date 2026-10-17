@@ -234,6 +234,10 @@ class CachedFrames:
             file.close()
             logger.warning(f"Cache non valida in {cache_dir}: {e}")
             return None
+        try:
+            os.utime(metadata_path)  # aggiorna l'ultimo utilizzo (usato dal limite di cache)
+        except OSError:
+            pass
         return cls(cache_dir, metadata, offsets, file, mm)
 
     def __len__(self):
