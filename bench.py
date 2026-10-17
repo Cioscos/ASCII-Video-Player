@@ -5,14 +5,10 @@ import time
 
 import cv2
 
-from main import EXTENDED
+from ascii_converter import compute_ascii_height
+from main import PALETTES as MAIN_PALETTES
 
-PALETTES = {
-    "basic": " .:-=+*#%@",
-    "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
-    "extended": EXTENDED,
-    "box": "box",
-}
+PALETTES = {**MAIN_PALETTES, "box": "box"}
 
 
 def _load_frames(video, width, max_frames):
@@ -28,7 +24,7 @@ def _load_frames(video, width, max_frames):
         if not ok:
             break
         h, w = frame.shape[:2]
-        cv2.resize(frame, (width, max(1, int(h / w * width / 2.25))), interpolation=cv2.INTER_NEAREST)
+        cv2.resize(frame, (width, compute_ascii_height(w, h, width)), interpolation=cv2.INTER_NEAREST)
         elapsed += time.perf_counter() - t0
         frames.append(frame)
     cap.release()
@@ -37,14 +33,13 @@ def _load_frames(video, width, max_frames):
 
 def _make_converter(width, palette, src_size):
     """Restituisce la funzione di conversione di ascii_converter per il frame sorgente dato."""
-    from ascii_converter import AsciiConverter, compute_ascii_height
+    from ascii_converter import AsciiConverter
     conv = AsciiConverter(width, compute_ascii_height(src_size[1], src_size[0], width), palette)
     return conv.convert_frame
 
 
 def _bench_precompute(video, width, palette, max_frames):
     """Precompute limitato a N frame (fps sorgente), con cache in una directory temporanea."""
-    from ascii_converter import compute_ascii_height
     from precomputer import CachedFrames, precompute
 
     cap = cv2.VideoCapture(video)

@@ -1,8 +1,9 @@
 import argparse
 import logging
+import os
 import sys
 import threading
-import os
+
 import cv2
 
 from ascii_converter import compute_ascii_height
@@ -11,7 +12,6 @@ from pipeline import VideoPipeline
 from utils import setup_logging, get_terminal_size
 
 HIDE_CURSOR = '\033[?25l'
-SHOW_CURSOR = '\033[?25h'
 
 # Palette 'extended' (67 caratteri), esposta a livello di modulo per i test
 EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"

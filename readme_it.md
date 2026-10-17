@@ -18,11 +18,12 @@
 
 ## 🔧 Requisiti
 
-- Python 3.6+
+- Python 3.12 (versioni fissate in `requirements.txt`)
 - Terminale con supporto ai colori ANSI (la maggior parte dei terminali moderni)
 - Dipendenze Python:
   - OpenCV (`opencv-python`)
   - NumPy
+  - tqdm (barra di avanzamento di `--high-performance`)
   - Per l'audio (opzionale):
     - SoundDevice
     - MoviePy
@@ -38,10 +39,13 @@
 2. Installa le dipendenze:
    ```bash
    # Installazione base
-   pip install opencv-python numpy
+   pip install opencv-python numpy tqdm
 
    # Con supporto audio
-   pip install opencv-python numpy sounddevice moviepy
+   pip install opencv-python numpy tqdm sounddevice moviepy
+
+   # Oppure, con le versioni fissate
+   pip install -r requirements.txt
    ```
 
 ## 🚀 Utilizzo
@@ -77,49 +81,73 @@ python main.py mio_video.mp4 80 --palette extended --log_fps --log_performance
 
 | Opzione | Descrizione |
 |---------|-------------|
-| `--fps N` | Imposta il frame rate target a N FPS (default: 10) |
+| `--fps N` | Imposta il frame rate target a N FPS (default: 10). È limitato agli FPS del video sorgente: la velocità di riproduzione è sempre corretta |
 | `--audio` | Abilita la riproduzione audio sincronizzata |
 | `--no-loop` | Disattiva il loop automatico del video |
 | `--log_fps` | Abilita la visualizzazione delle statistiche FPS |
 | `--log_performance` | Registra dati dettagliati sulle performance |
 | `--verbose` | Mostra messaggi di log dettagliati nel terminale |
-| `--batch_size N` | Dimensione del batch per l'elaborazione dei frame (default: 1) |
-| `--palette TYPE` | Scelta della palette caratteri: "basic", "standard", "extended", "box" o "custom" |
+| `--batch_size N` | Dimensione del batch per l'elaborazione dei frame in modalità standard (default: 1) |
+| `--high-performance` | Pre-converte l'intero video in una cache binaria su disco e lo riproduce da lì (vedi sotto) |
+| `--palette TYPE` | Scelta della palette caratteri: "basic", "standard" (default), "extended", "box" o "custom" |
 | `--custom-palette FILE` | File con caratteri personalizzati quando palette="custom" |
 
 ## 🏗️ Architettura
 
-Il sistema utilizza una pipeline parallela multi-processo con:
+Entrambe le modalità condividono la stessa conversione (`ascii_converter.py`), lo stesso output su terminale (`terminal_display.py`) e lo stesso ciclo di riproduzione (`playback.py`), che gira sempre nel processo principale.
 
-1. **Processo di lettura frame**: estrae i frame dal video a frequenza controllata
-2. **Processo di conversione ASCII**: trasforma i frame in rappresentazioni ASCII colorate
-3. **Thread di rendering**: visualizza i frame ASCII sul terminale e gestisce la sincronizzazione
+**Modalità standard** (default), pipeline multi-processo:
+
+1. **Processo di lettura frame**: decodifica il video, scarta i frame per raggiungere gli FPS effettivi e li ridimensiona
+2. **Processo di conversione ASCII**: trasforma i frame in stringhe di byte ASCII colorate
+3. **Riproduzione (processo principale)**: cadenza i frame su scadenze assolute, ridisegna solo le righe cambiate e mantiene sincronizzato l'audio
+
+**Modalità high-performance** (`--high-performance`): tutti i frame vengono convertiti in anticipo da un pool di processi in una cache binaria, poi riprodotti mappando in memoria il file della cache.
+
+### Modalità high-performance
+
+```bash
+python main.py mio_video.mp4 300 --fps 60 --palette extended --high-performance
+```
+
+La cache si trova in `cached_frames/<video>_<hash>/` (`frames.bin`, `index.npy`, `metadata.json`). L'hash comprende percorso, dimensione e data di modifica del video, larghezza, altezza, FPS effettivi, palette e versione del convertitore: cambiare uno di questi valori crea una nuova cache. Se la pre-elaborazione fallisce, il player ripiega sulla modalità standard. Un Ctrl+C durante la pre-elaborazione non lascia cache parziali utilizzabili.
+
+**Le cache create da versioni precedenti (`frame_*.txt` + `metadata.pkl`) vengono ignorate: cancella a mano le vecchie sottocartelle di `cached_frames/`.**
 
 ### Struttura del codice
 
-- `main.py`: Punto di ingresso dell'applicazione, gestione degli argomenti CLI
-- `pipeline.py`: Implementazione della pipeline parallela di elaborazione video
+- `main.py`: Punto di ingresso dell'applicazione, gestione degli argomenti CLI, palette
+- `ascii_converter.py`: Conversione vettorizzata da frame ad ASCII colorato (run-length dei colori, output in byte)
+- `terminal_display.py`: Output su terminale con aggiornamento per riga (delta)
+- `playback.py`: `FrameDecimator`, `PlaybackClock` e ciclo `run_playback`
+- `fps_stats.py`: Statistiche e grafico degli FPS
+- `pipeline.py`: Processi di lettura/conversione della modalità standard
+- `precomputer.py`: Cache binaria e pre-elaborazione della modalità high-performance
 - `audio_player.py`: Gestione della riproduzione audio sincronizzata
 - `calibration_frame.py`: Generazione del frame di calibrazione per il terminale
-- `renderer.py`: Rendering ottimizzato dei frame ASCII
-- `terminal_output_buffer.py`: Buffer ottimizzato per l'output del terminale
 - `utils.py`: Funzioni di utilità e sistema di logging
+- `bench.py`: Benchmark del convertitore
 
 ## 🔍 Note tecniche
 
 ### Performance
 
-- La conversione dei frame utilizza algoritmi vettorizzati NumPy per massimizzare l'efficienza
-- Le ottimizzazioni includono pre-calcolo delle lookup tables, minimizzazione delle allocazioni di memoria e operazioni vettorizzate
-- Il sistema di rendering utilizza un buffer ottimizzato per minimizzare le operazioni I/O sul terminale
-- La gestione adattiva del carico rileva e si adatta automaticamente alla capacità di elaborazione della macchina host
+- La conversione dei frame è vettorizzata con NumPy e unisce le sequenze di colori uguali per ridurre i byte scritti
+- Vengono riscritte solo le righe del terminale cambiate rispetto al frame precedente
+- La modalità standard usa code bloccanti senza perdite tra i processi: nessun frame viene perso
 
 ### Controllo FPS
 
-Il player tenta di mantenere il frame rate target specificato, con le seguenti strategie:
-- Estrazione frame a velocità controllata
-- Gestione del timing di rendering per mantenere FPS consistenti
-- Monitoraggio della performance in tempo reale e adattamento dinamico
+- Gli FPS effettivi sono `min(--fps, FPS sorgente)`, quindi la velocità di riproduzione è sempre corretta
+- I frame sono cadenzati su scadenze assolute; i frame vengono saltati solo quando il disegno è in ritardo
+- L'audio va in loop insieme al video e si risincronizza sul tempo del video
+
+### Test
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
 
 ## 📊 Visualizzazione delle performance
 
@@ -133,8 +161,8 @@ Quando l'opzione `--log_fps` è attivata, viene visualizzato un grafico in tempo
 ## 🎨 Palette caratteri disponibili
 
 - **Basic**: 10 caratteri (`" .:-=+*#%@"`)
-- **Standard**: 42 caratteri, più dettagliata
-- **Extended**: 70 caratteri, massimo dettaglio
+- **Standard**: 42 caratteri, più dettagliata (default)
+- **Extended**: 67 caratteri, massimo dettaglio
 - **Box**: Utilizza blocchi Unicode colorati per la massima densità visiva
 - **Custom**: Definita dall'utente tramite file di testo
 
