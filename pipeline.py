@@ -420,8 +420,7 @@ class VideoPipeline:
         self.loop_video = loop_video
         self.enable_audio = enable_audio
 
-        # Flag per indicare che il video è finito
-        self.video_finished = multiprocessing.Event()
+        self._stopped = False
 
         # Code di comunicazione tra processi
         queue_size = max(10, batch_size * 3)
@@ -701,11 +700,6 @@ class VideoPipeline:
                     try:
                         ascii_frames = self.ascii_queue.get(block=True, timeout=0.5)
                     except queue.Empty:
-                        # Controllo fine video
-                        if hasattr(self,
-                                   'video_finished') and self.video_finished.is_set() and self.ascii_queue.empty():
-                            renderer_logger.info("Video finito e coda ASCII vuota, terminazione del renderer")
-                            break
                         continue
 
                     # Controllo marker fine video
@@ -860,6 +854,9 @@ class VideoPipeline:
         Implementa una terminazione efficiente e non bloccante di tutti i componenti,
         gestendo in modo sicuro le risorse e le code.
         """
+        if self._stopped:
+            return
+        self._stopped = True
         self.logger.info("Arresto pipeline video")
 
         # Imposta flag terminazione

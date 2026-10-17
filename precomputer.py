@@ -454,6 +454,7 @@ class PrecomputedFramePlayer:
 
         # Flag di controllo
         self.should_stop = threading.Event()
+        self._stopped = False
         self.current_frame = 0
 
         # Inizializzazione audio se abilitato
@@ -823,6 +824,9 @@ class PrecomputedFramePlayer:
 
         Implementa una chiusura pulita di tutti i componenti del player.
         """
+        if self._stopped:
+            return
+        self._stopped = True
         self.logger.info("Arresto riproduzione")
 
         # Imposta flag di terminazione

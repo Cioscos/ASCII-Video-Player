@@ -13,8 +13,39 @@ from utils import setup_logging, get_terminal_size
 HIDE_CURSOR = '\033[?25l'
 SHOW_CURSOR = '\033[?25h'
 
-# Palette 'extended' (70 caratteri), esposta a livello di modulo per i test
+# Palette 'extended' (67 caratteri), esposta a livello di modulo per i test
 EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
+
+# Palette 'standard' (42 caratteri): sottocampionamento uniforme di 'extended'
+STANDARD = ' \'`",;l!~+-][{)(\\/frxuvzYUCL0Zmqdbha*MW8%@'
+
+PALETTES = {
+    "basic": " .:-=+*#%@",
+    "standard": STANDARD,
+    "extended": EXTENDED,
+}
+
+
+def load_custom_palette(path):
+    """
+    Legge una palette personalizzata da file (UTF-8).
+
+    Rimuove solo i caratteri di fine riga, preservando spazi iniziali e finali.
+
+    Args:
+        path (str): Percorso del file di palette
+
+    Returns:
+        str: La palette letta
+
+    Raises:
+        ValueError: Se la palette risultante e' vuota
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        palette = f.read().replace('\r', '').replace('\n', '')
+    if not palette:
+        raise ValueError(f"La palette personalizzata '{path}' e' vuota")
+    return palette
 
 
 def parse_arguments():
@@ -28,7 +59,7 @@ def parse_arguments():
         description="Real-time ASCII video using a parallel pipeline with separate conversion and rendering."
     )
     parser.add_argument("video_path", type=str, help="Path to the video file")
-    parser.add_argument("width", type=int, default=100, help="Width of the ASCII output")
+    parser.add_argument("width", type=int, help="Width of the ASCII output")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second for extraction (default: 10)")
     parser.add_argument("--log_fps", action="store_true", help="Enable logging of display FPS")
     parser.add_argument("--log_performance", action="store_true",
@@ -39,7 +70,7 @@ def parse_arguments():
                         help="Pre-elabora tutti i frame su disco per migliorare le performance")
     parser.add_argument("--palette", type=str, choices=["basic", "standard", "extended", "box", "custom"],
                         default="standard",
-                        help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (70 chars)")
+                        help="ASCII character palette to use: basic (10 chars), standard (42 chars), extended (67 chars)")
     parser.add_argument("--custom-palette", type=str,
                         help="Path to a custom palette file. It can be a normal .txt file.")
     parser.add_argument("--no-loop", action="store_true", help="Disable video looping (stop when video ends)")
@@ -151,31 +182,24 @@ def get_ascii_palette(args, logger):
     Returns:
         str: La palette ASCII da utilizzare
     """
-    if args.palette != 'box':
-        if args.palette == 'custom':
-            if not args.custom_palette:
-                logger.warning("È stata specificata 'custom' ma nessun file di palette. Uso 'standard'.")
-                args.palette = 'standard'
-            else:
-                try:
-                    with open(args.custom_palette, 'r') as f:
-                        ascii_palette = f.read().strip()
-                    return ascii_palette
-                except Exception as e:
-                    logger.error(f"Errore nella lettura della palette personalizzata: {e}")
-                    args.palette = 'standard'
+    if args.palette == 'box':
+        logger.info("Utilizzando metodo palette box")
+        return 'box'
 
-        palette_map = {
-            "basic": " .:-=+*#%@",
-            "standard": " ][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao#MW .:-=+*#%@",
-            "extended": EXTENDED
-        }
-        ascii_palette = palette_map[args.palette]
-        logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
-    else:
-        logger.info(f"Utilizzando metodo palette box")
-        ascii_palette = 'box'
+    if args.palette == 'custom':
+        if not args.custom_palette:
+            logger.warning("È stata specificata 'custom' ma nessun file di palette. Uso 'standard'.")
+        else:
+            try:
+                ascii_palette = load_custom_palette(args.custom_palette)
+                logger.info(f"Utilizzando palette personalizzata con {len(ascii_palette)} caratteri")
+                return ascii_palette
+            except Exception as e:
+                logger.error(f"Errore nella lettura della palette personalizzata: {e}. Uso 'standard'.")
+        args.palette = 'standard'
 
+    ascii_palette = PALETTES[args.palette]
+    logger.info(f"Utilizzando palette con {len(ascii_palette)} caratteri: {ascii_palette[:10]}...")
     return ascii_palette
 
 
@@ -295,8 +319,8 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     # Gestione segnali
     def signal_handler(sig, frame):
         logger.info("Segnale di interruzione ricevuto")
-        pipeline.stop()
-        sys.exit(0)
+        # L'arresto vero e proprio viene eseguito dal blocco finally
+        pipeline.should_stop.set()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -355,13 +379,6 @@ def main():
     frame, fps_originale, frame_totali = get_video_info(args.video_path, logger)
     if frame is None:
         return 1
-
-    # Suggerimento FPS per audio
-    if args.audio and args.fps is None:
-        target_fps = min(30, int(fps_originale))  # Limita a max 30 FPS
-        logger.info(
-            f"Audio abilitato senza FPS target specificati. Usando {target_fps} FPS per una migliore sincronizzazione.")
-        args.fps = target_fps
 
     # Calcola dimensioni ASCII
     term_width, term_height = get_terminal_size()
