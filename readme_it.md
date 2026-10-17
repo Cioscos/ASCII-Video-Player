@@ -10,11 +10,11 @@
 
 - **Riproduzione video in ASCII art** nel terminale con supporto a colori
 - **Pipeline di elaborazione parallela** per prestazioni ottimali
-- **Sincronizzazione audio-video** con gestione adattiva dei ritardi
+- **Sincronizzazione audio-video**: l'audio segue l'orologio del video e si risincronizza sul tempo video corrente quando si discosta
 - **Multiple palette di caratteri ASCII** (basic, standard, extended, box o custom)
 - **Sistema di calibrazione automatico** per adattarsi alle dimensioni del terminale
 - **Monitoraggio performance in tempo reale** con visualizzazione grafica degli FPS
-- **Gestione adattiva del carico** per mantenere la sincronizzazione anche su hardware meno potenti
+- **Temporizzazione a scadenze assolute**: ogni frame ha una scadenza fissa; i frame vengono saltati solo quando il disegno resta indietro, così la riproduzione mantiene il ritmo anche su hardware meno potenti
 
 ## 🔧 Requisiti
 

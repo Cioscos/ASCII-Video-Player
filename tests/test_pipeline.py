@@ -43,3 +43,24 @@ def test_source_ends_when_reader_crashes(tiny_video):
         assert p.should_stop.is_set()
     finally:
         p.stop()
+
+
+def test_loop_restarts_decimated_indices(tiny_video):
+    # 48 frame a 24 fps decimati a 12 fps -> 24 frame per giro
+    p = VideoPipeline(tiny_video, 32, 8, 24.0, 12, 4, " .:@", loop_video=True); p.start()
+    try:
+        source = p.frame_source()
+        indices = [source.next_frame()[0] for _ in range(30)]
+    finally:
+        p.stop()
+    assert indices == list(range(24)) + list(range(6))
+
+
+def test_partial_last_batch_then_marker(tiny_video):
+    # batch_size=5 su 24 frame decimati: l'ultimo batch ha 4 frame, poi il marker
+    p = VideoPipeline(tiny_video, 32, 8, 24.0, 12, 5, " .:@", loop_video=False); p.start()
+    try:
+        drawn = run_playback(p.frame_source(), p.effective_fps, TerminalDisplay(io.BytesIO()), p.should_stop, loop=False)
+    finally:
+        p.stop()
+    assert drawn == 24

@@ -10,11 +10,11 @@
 
 - **ASCII art video playback** in the terminal with color support
 - **Parallel processing pipeline** for optimal performance
-- **Audio-video synchronization** with adaptive delay management
+- **Audio-video synchronization**: audio follows the video clock and resyncs to the current video time when it drifts
 - **Multiple ASCII character palettes** (basic, standard, extended, box, or custom)
 - **Automatic calibration system** to adapt to terminal dimensions
 - **Real-time performance monitoring** with graphical FPS display
-- **Adaptive load management** to maintain synchronization even on less powerful hardware
+- **Deadline-based pacing**: each frame has an absolute deadline; frames are skipped only when drawing falls behind, so playback keeps its timing even on less powerful hardware
 
 ## 🔧 Requirements
 
