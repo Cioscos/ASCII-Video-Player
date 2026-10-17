@@ -59,3 +59,66 @@ class AsciiConverter:
     def convert_frame(self, frame) -> bytes:
         """Ridimensiona e converte un frame sorgente."""
         return self.convert(self.resize(frame))
+
+
+HALF_CHAR = '▀'
+
+
+def pixel_rows(height: int, palette: str) -> int:
+    """Righe di pixel necessarie per `height` righe di terminale (2 per riga con 'half')."""
+    return 2 * height if palette == 'half' else height
+
+
+def _color256(resized):
+    """Codice colore 256 (16..231) per ogni pixel di un frame BGR."""
+    b = resized[:, :, 0].astype(np.int16)
+    g = resized[:, :, 1].astype(np.int16)
+    r = resized[:, :, 2].astype(np.int16)
+    return 16 + 36 * np.minimum(5, r // 43) + 6 * np.minimum(5, g // 43) + np.minimum(5, b // 43)
+
+
+class HalfBlockConverter:
+    """Converte frame BGR in mezzi blocchi '▀': colore testo = pixel sopra, sfondo = pixel sotto."""
+
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.palette = 'half'
+        half = HALF_CHAR.encode("utf-8")
+        self.full_tok = np.empty((216, 216), dtype=object)
+        for top in range(16, 232):
+            for bot in range(16, 232):
+                self.full_tok[top - 16, bot - 16] = f"\033[38;5;{top};48;5;{bot}m{HALF_CHAR}".encode("utf-8")
+        self.short_tok = half
+        self.row_end = b"\033[0m\n"
+
+    def resize(self, frame):
+        """Ridimensiona il frame a width x (2 * height) pixel (nearest neighbour)."""
+        return cv2.resize(frame, (self.width, 2 * self.height), interpolation=cv2.INTER_NEAREST)
+
+    def convert(self, resized) -> bytes:
+        """Converte un frame gia' ridimensionato (2*H, W, 3 BGR); nessun '\n' finale."""
+        color = _color256(resized)
+        top = color[0::2]
+        bot = color[1::2]
+        h, w = top.shape
+        change = np.ones(top.shape, dtype=bool)
+        change[:, 1:] = (top[:, 1:] != top[:, :-1]) | (bot[:, 1:] != bot[:, :-1])
+        cells = np.where(change, self.full_tok[top - 16, bot - 16], self.short_tok)
+        grid = np.empty((h, w + 1), dtype=object)
+        grid[:, :w] = cells
+        grid[:, w] = self.row_end
+        return b"".join(grid.ravel().tolist())[:-1]
+
+    def convert_frame(self, frame) -> bytes:
+        """Ridimensiona e converte un frame sorgente."""
+        return self.convert(self.resize(frame))
+
+
+def make_converter(width: int, height: int, palette: str, truecolor: bool = False):
+    """Crea il converter adatto alla palette ('half' -> mezzi blocchi, altrimenti caratteri/'box')."""
+    if truecolor:
+        raise NotImplementedError("Truecolor non ancora supportato")
+    if palette == 'half':
+        return HalfBlockConverter(width, height)
+    return AsciiConverter(width, height, palette)

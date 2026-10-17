@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from ascii_converter import AsciiConverter, compute_ascii_height
+from ascii_converter import AsciiConverter, compute_ascii_height, make_converter, pixel_rows
 from main import EXTENDED
-from tests.reference import parse_ansi_grid, reference_grid
+from tests.reference import parse_ansi_cells, parse_ansi_grid, reference_cells, reference_grid
 
 
 @pytest.mark.parametrize("palette", [" .:-=+*#%@", EXTENDED, "@", "box", "░▒▓█"])
@@ -39,3 +39,30 @@ def test_long_custom_palette_matches_reference(random_frame):
 def test_empty_palette_raises():
     with pytest.raises(ValueError):
         AsciiConverter(10, 2, "")
+
+
+def test_half_matches_reference(random_frame):
+    h = compute_ascii_height(160, 90, 120)
+    out = make_converter(120, h, "half").convert_frame(random_frame)
+    assert parse_ansi_cells(out) == reference_cells(random_frame, 120, "half")
+
+
+def test_half_doubles_pixel_rows():
+    assert pixel_rows(10, "half") == 20 and pixel_rows(10, "@") == 10
+    assert make_converter(40, 10, "half").resize(np.zeros((90, 160, 3), np.uint8)).shape == (20, 40, 3)
+
+
+def test_half_run_length_on_pair():
+    f = np.zeros((8, 40, 3), np.uint8)
+    f[1::2, 20:] = 255  # cambia solo il pixel sotto, da meta' riga
+    out = make_converter(40, 4, "half").convert(f)
+    assert out.count(b"\033[38;5;") == 8 and out.count("▀".encode()) == 160
+
+
+def test_make_converter_default_is_ascii_converter():
+    assert type(make_converter(40, 4, "@")) is AsciiConverter
+
+
+def test_reference_cells_agrees_with_legacy_reference(random_frame):
+    legacy = reference_grid(random_frame, 120, EXTENDED)
+    assert [[(c, f) for c, f, _ in row] for row in reference_cells(random_frame, 120, EXTENDED)] == legacy
