@@ -67,7 +67,7 @@ Escluso: pacchetto installabile.
 
 - `width` diventa facoltativo da riga di comando (`nargs='?'`); nel menu il valore `auto`.
 - `auto_width(src_w, src_h, term_cols, term_rows, reserved_rows) -> int`: la massima larghezza `w` tale che `w <= term_cols`, `compute_ascii_height(src_w, src_h, w) + reserved_rows <= term_rows`, `w <= src_w`; minimo 1.
-- `reserved_rows` = 1 senza `--log_fps`; con `--log_fps` 1 + le righe dell'overlay di `FpsStats` (riga vuota + statistiche + grafico).
+- `reserved_rows` = 2 senza `--log_fps` (riga vuota + una riga di stato, es. `⏸ In pausa`); 6 con `--log_fps` (riga vuota + 4 righe di `FpsStats` + una riga di stato).
 - Con larghezza esplicita resta l'avviso attuale se il frame è più alto del terminale.
 
 ### 2.6 Benchmark
