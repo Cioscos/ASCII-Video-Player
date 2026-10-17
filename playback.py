@@ -7,6 +7,15 @@ from typing import Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
+SEEK_SHORT_S = 5
+SEEK_LONG_S = 30
+PAUSE_TEXT = "⏸ In pausa"
+SEEK_UNAVAILABLE_TEXT = "Seek disponibile solo con --high-performance"
+STATUS_SECONDS = 2.0
+
+_QUIT_KEYS = ("q", "esc")
+_SEEK_SECONDS = {"left": -SEEK_SHORT_S, "right": SEEK_SHORT_S, "down": -SEEK_LONG_S, "up": SEEK_LONG_S}
+
 
 class FrameDecimator:
     """
@@ -103,8 +112,125 @@ class FrameSource(Protocol):
         ...
 
 
+def seek_target(current: int, delta: int, total: int, loop: bool) -> int:
+    """
+    Indice di destinazione di un seek di `delta` frame a partire da `current`.
+
+    Indietro oltre l'inizio → 0; avanti oltre la fine → 0 con il loop,
+    altrimenti l'ultimo frame.
+    """
+    target = current + delta
+    if target < 0:
+        return 0
+    if target >= total:
+        return 0 if loop else total - 1
+    return target
+
+
+class _Overlay:
+    """Righe di overlay correnti: statistiche più un'eventuale riga di stato a tempo."""
+
+    def __init__(self):
+        self.stats_lines = []
+        self.status = None
+        self.status_until = 0.0
+        self.dirty = False  # l'overlay va ridisegnato al prossimo frame
+
+    def lines(self, extra=None):
+        """Lista esplicita delle righe (mai None, così l'overlay precedente viene sostituito)."""
+        lines = list(self.stats_lines)
+        if self.status:
+            lines.append(self.status)
+        if extra:
+            lines.append(extra)
+        return lines
+
+    def set_status(self, text, now):
+        self.status = text
+        self.status_until = now + STATUS_SECONDS
+        self.dirty = True
+
+    def expire(self, now):
+        """Rimuove la riga di stato scaduta."""
+        if self.status and now >= self.status_until:
+            self.status = None
+            self.dirty = True
+
+
+class _KeyHandler:
+    """Gestione dei tasti di controllo (pausa, seek, uscita) per run_playback."""
+
+    def __init__(self, controls, source, fps, loop, display, clock, audio, should_stop, overlay):
+        self.controls = controls
+        self.source = source
+        self.fps = fps
+        self.loop = loop
+        self.display = display
+        self.clock = clock
+        self.audio = audio
+        self.should_stop = should_stop
+        self.overlay = overlay
+
+    def handle(self, key, n, last):
+        """
+        Esegue l'azione del tasto.
+
+        Args:
+            key (str): nome del tasto
+            n (int): contatore del clock del prossimo frame da estrarre
+            last (tuple | None): (indice, frame) dell'ultimo frame disegnato
+
+        Returns:
+            bool: True se la riproduzione deve terminare
+        """
+        if key in _QUIT_KEYS:
+            return True
+        if key == "space":
+            return self._pause(n, last)
+        if key in _SEEK_SECONDS:
+            self._seek(_SEEK_SECONDS[key], n, last)
+        return False
+
+    def _pause(self, n, last):
+        """Pausa fino a `space` (ripresa) o `q`/`esc`/should_stop (uscita)."""
+        if last is not None:
+            self.display.show(last[1], self.overlay.lines(PAUSE_TEXT))
+        if self.audio is not None:
+            self.audio.set_paused(True)
+        logger.info("Riproduzione in pausa")
+        while not self.should_stop.is_set():
+            key = self.controls.read(0.05)
+            if key in _QUIT_KEYS:
+                return True
+            if key == "space":
+                break
+        else:
+            return True
+        if self.audio is not None:
+            self.audio.set_paused(False)
+        self.clock.rebase(n)  # nessun frame saltato per il tempo passato in pausa
+        if last is not None:
+            self.display.show(last[1], self.overlay.lines())
+        logger.info("Riproduzione ripresa")
+        return False
+
+    def _seek(self, seconds, n, last):
+        """Seek di `seconds` secondi rispetto all'ultimo frame disegnato."""
+        if not hasattr(self.source, "seek"):
+            self.overlay.set_status(SEEK_UNAVAILABLE_TEXT, self.clock.now())
+            return
+        current = last[0] if last is not None else 0
+        target = seek_target(current, round(seconds * self.fps), len(self.source), self.loop)
+        self.source.seek(target)
+        self.clock.rebase(n)  # il frame di destinazione viene disegnato subito
+        if self.audio is not None:
+            self.audio.seek(target / self.fps)
+        logger.info("Seek di %+ds: frame %d → %d", seconds, current, target)
+
+
 def run_playback(source, fps, display, should_stop: threading.Event, loop,
-                 stats=None, audio=None, clock: Optional[PlaybackClock] = None) -> int:
+                 stats=None, audio=None, clock: Optional[PlaybackClock] = None,
+                 controls=None) -> int:
     """
     Loop di riproduzione comune a entrambe le modalità.
 
@@ -112,8 +238,12 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     saltato). I frame in ritardo di almeno un frame (ma meno di 1 s) vengono
     saltati; con ritardo >= 1 s (stallo) l'orologio viene riancorato.
 
+    Con `controls` (oggetto con `poll()` e `read(timeout)`) i tasti vengono
+    letti una volta per frame: `space` pausa, `q`/`esc` uscita, frecce seek
+    (solo se la sorgente ha `seek`).
+
     Returns:
-        int: numero di frame disegnati
+        int: numero di frame estratti dalla sorgente e disegnati
     """
     if clock is None:
         clock = PlaybackClock(fps)
@@ -124,8 +254,18 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     drawn = 0
     last_draw = None
     got_frame = False  # almeno un frame ottenuto dall'ultimo avvio/restart
+    last = None  # (indice, frame) dell'ultimo frame disegnato
+    overlay_state = _Overlay()
+    keys = None
+    if controls is not None:
+        keys = _KeyHandler(controls, source, fps, loop, display, clock, audio, should_stop, overlay_state)
 
     while not should_stop.is_set():
+        if keys is not None:
+            key = controls.poll()
+            if key is not None and keys.handle(key, n, last):
+                break
+
         fetch_start = clock.now()
         item = source.next_frame()
         fetch_time = clock.now() - fetch_start
@@ -157,11 +297,17 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
         if audio is not None:
             audio.update_video_time(index / fps)
 
-        overlay = None
         if stats is not None and drawn % 5 == 0:
-            overlay = stats.overlay_lines(f"Frame {index}")
+            overlay_state.stats_lines = stats.overlay_lines(f"Frame {index}")
+            overlay_state.dirty = True
+        overlay_state.expire(clock.now())
+        overlay = None  # None mantiene l'overlay già mostrato
+        if overlay_state.dirty:
+            overlay = overlay_state.lines()
+            overlay_state.dirty = False
         display.show(frame, overlay)
         drawn += 1
+        last = item
 
         now = clock.now()
         if stats is not None and last_draw is not None:

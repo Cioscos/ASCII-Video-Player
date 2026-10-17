@@ -1,7 +1,8 @@
 import threading
 
 from fps_stats import FpsStats
-from playback import PlaybackClock, run_playback
+from playback import (PAUSE_TEXT, SEEK_UNAVAILABLE_TEXT, PlaybackClock, run_playback,
+                      seek_target)
 from tests.fakes import FakeTime
 
 
@@ -47,9 +48,21 @@ class RecordingDisplay:
 class FakeAudio:
     def __init__(self):
         self.times = []
+        self.paused_calls = []
+        self.seeks = []
+        self.events = []  # sequenza ordinata di tutte le chiamate
 
     def update_video_time(self, t):
         self.times.append(t)
+        self.events.append(("time", t))
+
+    def set_paused(self, paused):
+        self.paused_calls.append(paused)
+        self.events.append(("paused", paused))
+
+    def seek(self, t):
+        self.seeks.append(t)
+        self.events.append(("seek", t))
 
 
 def make(n):
@@ -145,3 +158,172 @@ def test_single_frame_loop_bounded_by_stop():
     d = RecordingDisplay(on_show=lambda k: stop.set() if k == 7 else None)
     run_playback(ListSource(make(1)), 10, d, stop, loop=True, clock=make_clock(10, ft))
     assert d.drawn == [0] * 7
+
+
+class FakeKeys:
+    """Tastiera finta: `script` indicizzato per numero (da 1) di chiamate a poll."""
+
+    def __init__(self, script=None, after_pause=(), ft=None):
+        self.script = dict(script or {})
+        self.after_pause = list(after_pause)
+        self.ft = ft
+        self.polls = 0
+
+    def poll(self):
+        self.polls += 1
+        return self.script.get(self.polls)
+
+    def read(self, timeout):
+        if self.ft is not None:
+            self.ft.advance(timeout)  # simula l'attesa del timeout
+        return self.after_pause.pop(0) if self.after_pause else None
+
+
+class SeekableListSource(ListSource):
+    """ListSource con seek, come CachedFrameSource."""
+
+    def seek(self, index):
+        self.pos = index
+
+    def __len__(self):
+        return len(self.frames)
+
+
+def test_q_quits():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    n = run_playback(ListSource(make(10)), 10, d, threading.Event(), loop=False,
+                     clock=make_clock(10, ft), controls=FakeKeys({3: "q"}))
+    assert d.drawn == [0, 1]
+    assert n == 2
+
+
+def test_esc_quits_during_pause():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    a = FakeAudio()
+    n = run_playback(ListSource(make(10)), 10, d, threading.Event(), loop=False, audio=a,
+                     clock=make_clock(10, ft), controls=FakeKeys({2: "space"}, after_pause=[None, "esc"]))
+    assert d.drawn == [0, 0]
+    assert n == 1
+    assert a.paused_calls == [True]
+
+
+def test_pause_and_resume_draws_no_extra_frames():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    a = FakeAudio()
+    keys = FakeKeys({3: "space"}, after_pause=[None, None, "space"], ft=ft)
+    n = run_playback(ListSource(make(10)), 10, d, threading.Event(), loop=False, audio=a,
+                     clock=make_clock(10, ft), controls=keys)
+    assert d.drawn == [0, 1, 1, 1] + list(range(2, 10))
+    assert n == 10  # i ridisegni di pausa/ripresa non contano
+    assert a.paused_calls == [True, False]
+    assert PAUSE_TEXT in d.overlays[2]
+    assert d.overlays[3] == []  # ripresa: riga di stato rimossa
+    assert d.overlays[4] is None
+
+
+def test_pause_overlay_follows_stats_lines():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    keys = FakeKeys({3: "space"}, after_pause=["space"])
+    run_playback(ListSource(make(10)), 10, d, threading.Event(), loop=False, stats=FpsStats(10),
+                 clock=make_clock(10, ft), controls=keys)
+    stats_lines = d.overlays[0]
+    assert d.overlays[2][-1] == PAUSE_TEXT
+    assert len(d.overlays[2]) == len(stats_lines) + 1
+    assert len(d.overlays[3]) == len(stats_lines) and PAUSE_TEXT not in d.overlays[3]
+
+
+def test_seek_forward_and_back_on_seekable_source():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    a = FakeAudio()
+    keys = FakeKeys({11: "right", 12: "left"})
+    run_playback(SeekableListSource(make(100)), 10, d, threading.Event(), loop=False, audio=a,
+                 clock=make_clock(10, ft), controls=keys)
+    assert d.drawn[:13] == list(range(10)) + [59, 9, 10]
+    assert a.seeks == [5.9, 0.9]
+
+
+def test_seek_long_and_before_start():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    keys = FakeKeys({4: "down", 6: "up"})
+    run_playback(SeekableListSource(make(400)), 10, d, threading.Event(), loop=False,
+                 clock=make_clock(10, ft), controls=keys)
+    assert d.drawn[:7] == [0, 1, 2, 0, 1, 301, 302]
+
+
+def test_seek_clamps_at_end_without_loop():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    keys = FakeKeys({7: "up"})
+    run_playback(SeekableListSource(make(20)), 10, d, threading.Event(), loop=False,
+                 clock=make_clock(10, ft), controls=keys)
+    assert d.drawn == [0, 1, 2, 3, 4, 5, 19]
+
+
+def test_seek_wraps_to_start_with_loop():
+    ft = FakeTime()
+    stop = threading.Event()
+    d = RecordingDisplay(on_show=lambda k: stop.set() if k == 9 else None)
+    keys = FakeKeys({7: "up"})
+    run_playback(SeekableListSource(make(20)), 10, d, stop, loop=True,
+                 clock=make_clock(10, ft), controls=keys)
+    assert d.drawn == [0, 1, 2, 3, 4, 5, 0, 1, 2]
+
+
+def test_seek_unavailable_shows_status_then_clears():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    keys = FakeKeys({3: "right"})
+    run_playback(ListSource(make(40)), 10, d, threading.Event(), loop=False,
+                 clock=make_clock(10, ft), controls=keys)
+    assert d.drawn == list(range(40))  # nessun seek
+    assert d.overlays[2] == [SEEK_UNAVAILABLE_TEXT]
+    cleared = d.overlays.index([])
+    assert 20 <= cleared <= 23  # dopo circa 2 s di tempo finto (frame a 10 fps)
+    assert all(o is None for o in d.overlays[3:cleared])
+    assert all(o is None for o in d.overlays[cleared + 1:])
+
+
+def test_seek_unavailable_status_kept_in_stats_refresh():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    keys = FakeKeys({3: "left"})
+    run_playback(ListSource(make(40)), 10, d, threading.Event(), loop=False, stats=FpsStats(10),
+                 clock=make_clock(10, ft), controls=keys)
+    stats_len = len(d.overlays[0])
+    assert d.overlays[2][-1] == SEEK_UNAVAILABLE_TEXT and len(d.overlays[2]) == stats_len + 1
+    assert d.overlays[5][-1] == SEEK_UNAVAILABLE_TEXT  # aggiornamento stats con stato attivo
+    cleared = next(i for i, o in enumerate(d.overlays) if i > 2 and o and SEEK_UNAVAILABLE_TEXT not in o)
+    assert 20 <= cleared <= 23
+
+
+def test_seek_target_rules():
+    assert seek_target(5, -10, 20, False) == 0 and seek_target(15, 10, 20, False) == 19
+    assert seek_target(15, 10, 20, True) == 0 and seek_target(3, 4, 20, True) == 7
+
+
+def test_pause_updates_audio_video_time_consistently():
+    ft = FakeTime()
+    a = FakeAudio()
+    keys = FakeKeys({3: "space"}, after_pause=[None, None, "space"], ft=ft)
+    run_playback(ListSource(make(10)), 10, RecordingDisplay(), threading.Event(), loop=False, audio=a,
+                 clock=make_clock(10, ft), controls=keys)
+    resume = a.events.index(("paused", False))
+    assert a.events[resume - 1] == ("paused", True)  # nessun update durante la pausa
+    assert a.events[resume + 1] == ("time", 0.2)
+    assert a.times == [i / 10 for i in range(10)]
+
+
+def test_seek_then_audio_time_matches_target():
+    ft = FakeTime()
+    a = FakeAudio()
+    keys = FakeKeys({4: "right"})
+    run_playback(SeekableListSource(make(100)), 10, RecordingDisplay(), threading.Event(), loop=False,
+                 audio=a, clock=make_clock(10, ft), controls=keys)
+    i = a.events.index(("seek", 5.2))
+    assert a.events[i + 1] == ("time", 5.2)

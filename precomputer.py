@@ -271,3 +271,11 @@ class CachedFrameSource:
     def restart(self):
         """Riparte dal primo frame."""
         self._next = 0
+
+    def seek(self, index):
+        """Il prossimo next_frame restituirà il frame con questo indice."""
+        self._next = index
+
+    def __len__(self):
+        """Numero di frame nella cache."""
+        return len(self.cached)

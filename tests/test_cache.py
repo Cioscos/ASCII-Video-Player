@@ -104,6 +104,18 @@ def test_source_iterates_and_restarts(tiny_video, tmp_path):
         c.close()
 
 
+def test_cached_source_seek(tiny_video, tmp_path):
+    c = CachedFrames.open(precompute(tiny_video, 32, 8, 24.0, 12, " .:@", str(tmp_path), processes=0))
+    try:
+        src = CachedFrameSource(c)
+        assert len(src) == 24
+        src.next_frame()
+        src.seek(5)
+        assert src.next_frame() == (5, c.frame(5))
+    finally:
+        c.close()
+
+
 def test_open_missing_metadata_returns_none(tmp_path):
     assert CachedFrames.open(str(tmp_path / "inesistente")) is None
 
