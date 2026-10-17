@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 import sys
@@ -50,7 +51,8 @@ class FramePrecomputer:
 
         # Crea un nome univoco basato sul file e sui parametri
         video_name = os.path.basename(video_path).rsplit('.', 1)[0]
-        cache_name = f"{video_name}_w{width}_fps{target_fps or 'orig'}"
+        palette_hash = hashlib.sha1((ascii_palette or "").encode("utf-8")).hexdigest()[:8]
+        cache_name = f"{video_name}_w{width}_fps{target_fps or 'orig'}_p{palette_hash}"
 
         # Directory per la cache
         self.output_dir = output_dir or os.path.join("cached_frames", cache_name)
@@ -101,6 +103,7 @@ class FramePrecomputer:
             "height": height,
             "duration": duration,
             "ascii_width": self.width,
+            "ascii_palette": self.ascii_palette,
             "video_path": self.video_path
         }
 
@@ -248,16 +251,6 @@ class FramePrecomputer:
         Returns:
             dict: Metadati del processo di precomputing
         """
-        # Verifica se la cache esiste già
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'rb') as f:
-                    self.metadata = pickle.load(f)
-                self.logger.info(f"Caricati metadati dalla cache esistente: {self.output_dir}")
-                return self.metadata
-            except Exception as e:
-                self.logger.warning(f"Impossibile caricare la cache esistente: {e}")
-
         # Estrai informazioni video
         video_info = self._extract_video_info()
         if not video_info:
@@ -284,18 +277,15 @@ class FramePrecomputer:
         frame_queue = queue.Queue(maxsize=self.batch_size * 2)
         result_queue = queue.Queue()
 
-        # Flag per il completamento
-        processing_complete = threading.Event()
-
-        # Thread worker per la conversione
+        # Thread worker per la conversione: terminano solo alla sentinella None
         def worker():
-            while not processing_complete.is_set() or not frame_queue.empty():
-                try:
-                    frame_data = frame_queue.get(timeout=0.5)
-                    if frame_data is None:
-                        break
+            while True:
+                frame_data = frame_queue.get()
+                if frame_data is None:
+                    break
 
-                    frame_index, frame = frame_data
+                frame_index, frame = frame_data
+                try:
                     ascii_frame = self._convert_frame_to_ascii(frame)
 
                     # Salva il frame
@@ -304,15 +294,12 @@ class FramePrecomputer:
                         f.write(ascii_frame)
 
                     result_queue.put(frame_index)
-                    frame_queue.task_done()
-                except queue.Empty:
-                    continue
                 except Exception as e:
-                    self.logger.error(f"Errore nell'elaborazione del frame: {e}")
-                    frame_queue.task_done()
+                    self.logger.error(f"Errore nell'elaborazione del frame {frame_index}: {e}")
+                    result_queue.put(None)
 
         # Avvia i worker threads
-        num_workers = min(os.cpu_count(), 4)  # Limita il numero di thread
+        num_workers = min(os.cpu_count() or 1, 4)  # Limita il numero di thread
         workers = []
         for _ in range(num_workers):
             t = threading.Thread(target=worker, daemon=True)
@@ -326,6 +313,8 @@ class FramePrecomputer:
                 decimator = FrameDecimator(video_info["original_fps"], self.target_fps)
                 frame_idx = 0
                 processed_count = 0
+                done_count = 0
+                failed_count = 0
 
                 # Loop principale di estrazione
                 while processed_count < video_info["actual_frames"] and cap.isOpened():
@@ -342,15 +331,25 @@ class FramePrecomputer:
 
                     frame_idx += 1
 
-                    # Aggiorna la barra di progresso con i frame elaborati
+                    # Aggiorna la barra di progresso con i frame già elaborati
                     while not result_queue.empty():
-                        result_queue.get()
+                        done_count += 1
+                        failed_count += result_queue.get() is None
                         pbar.update(1)
 
-            # Aspetta che tutti i frame siano processati
-            processing_complete.set()
+                # Una sentinella per ogni worker, poi attesa di tutti i risultati
+                for _ in workers:
+                    frame_queue.put(None)
+                while done_count < processed_count:
+                    done_count += 1
+                    failed_count += result_queue.get() is None
+                    pbar.update(1)
+
             for t in workers:
-                t.join(timeout=1.0)
+                t.join()
+
+            if failed_count:
+                raise RuntimeError(f"{failed_count} frame non salvati")
 
             # Aggiorna i metadati
             self.metadata["processed_frames"] = processed_count
@@ -391,6 +390,8 @@ class FramePrecomputer:
             if (metadata.get("video_path") != self.video_path or
                     metadata.get("ascii_width") != self.width):
                 return False
+            if metadata.get("ascii_palette") != self.ascii_palette:
+                return False
             if self.target_fps:
                 from playback import FrameDecimator
                 expected_fps = FrameDecimator(metadata.get("original_fps"), self.target_fps).effective_fps
@@ -402,9 +403,8 @@ class FramePrecomputer:
             if frame_count <= 0:
                 return False
 
-            # Controlla alcuni frame a campione
-            sample_indices = [0, frame_count // 2, frame_count - 1]
-            for idx in sample_indices:
+            # Controlla che tutti i frame esistano
+            for idx in range(frame_count):
                 frame_file = os.path.join(self.output_dir, f"frame_{idx:06d}.txt")
                 if not os.path.exists(frame_file):
                     return False
