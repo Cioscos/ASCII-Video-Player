@@ -1,6 +1,12 @@
 import io
+import json
+import os
+import subprocess
+import sys
 
-from keyboard_input import KeyReader, decode_keys
+import pytest
+
+from keyboard_input import KeyReader, decode_keys, records_to_chars
 
 
 def test_windows_arrows_and_keys():
@@ -71,28 +77,25 @@ def test_windows_lone_prefix_stays_a_grave():
     assert decode_keys("à", windows=True) == ["à"]
 
 
-def test_read_raw_windows_marks_extended_pairs(monkeypatch):
-    import sys
-    import types
-    seq = list("àS") + ["à"]
-    fake = types.SimpleNamespace(kbhit=lambda: bool(seq), getwch=lambda: seq.pop(0))
-    monkeypatch.setitem(sys.modules, "msvcrt", fake)
-    k = KeyReader(io.StringIO())
-    k._windows = True
-    assert decode_keys(k._read_raw_windows(), windows=True) == ["à"]
+def test_records_to_chars_arrows_never_a_grave():
+    # (premuto, virtual key, carattere, ripetizioni): ↓ ha carattere nullo, "à" ha vk 0
+    events = [(True, 0x28, "\x00", 1), (False, 0x28, "\x00", 1), (True, 0, "à", 1),
+              (True, 0x26, "\x00", 2), (True, 0x2E, "\x00", 1), (True, 0x51, "q", 1)]
+    assert decode_keys(records_to_chars(events), windows=True) == ["down", "à", "up", "up", "q"]
 
 
-def test_enter_drains_pending_input_windows(monkeypatch):
-    import sys
-    import types
-    seq = list("abc")
-    fake = types.SimpleNamespace(kbhit=lambda: bool(seq), getwch=lambda: seq.pop(0))
-    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+def test_records_to_chars_a_grave_then_key_keeps_both():
+    events = [(True, 0, "à", 1), (True, 0x51, "q", 1)]
+    assert decode_keys(records_to_chars(events), windows=True) == ["à", "q"]
 
-    class Tty(io.StringIO):
-        def isatty(self):
-            return True
-    k = KeyReader(Tty())
-    k._windows = True
-    with k:
-        assert seq == []
+
+@pytest.mark.skipif(os.name != "nt", reason="richiede una console Windows")
+def test_windows_real_console_arrows_and_a_grave(tmp_path):
+    # Console vera: con msvcrt.getwch le frecce arrivavano come "à" + lettera;
+    # il tasto premuto prima dell'avvio del lettore viene scartato
+    out = tmp_path / "keys.json"
+    probe = os.path.join(os.path.dirname(__file__), "console_keys_probe.py")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    subprocess.run([sys.executable, probe, str(out), root],
+                   creationflags=subprocess.CREATE_NEW_CONSOLE, timeout=30, check=True)
+    assert json.loads(out.read_text(encoding="utf-8"))["keys"] == ["down", "left", "à", "à", "q", "enter"]

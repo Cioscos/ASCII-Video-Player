@@ -9,6 +9,10 @@ _WIN_PREFIXES = ("\x00", "\xe0")
 # arrivata insieme: indica con certezza un tasto esteso (non la lettera "à")
 _EXT_MARK = "￾"
 _WIN_ARROWS = {"H": "up", "P": "down", "K": "left", "M": "right"}
+# Virtual key code delle frecce → lettera del codice esteso (VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN)
+_VK_ARROWS = {0x25: "K", 0x26: "H", 0x27: "M", 0x28: "P"}
+_STD_INPUT_HANDLE = -10
+_KEY_EVENT = 1
 _POSIX_ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
 _SIMPLE = {
     "\r": "enter",
@@ -59,6 +63,58 @@ def decode_keys(chars: str, windows: bool) -> list[str]:
     return keys
 
 
+def records_to_chars(events) -> str:
+    """Converte eventi tastiera della console Windows in caratteri grezzi per decode_keys.
+
+    Args:
+        events: sequenza di (premuto, virtual key code, carattere, ripetizioni)
+
+    Le frecce diventano coppie estese marcate (mai confuse con la lettera "à");
+    gli altri tasti senza carattere (Home, Canc, F1...) e i rilasci vengono scartati.
+    """
+    chars = ""
+    for key_down, vk, char, repeat in events:
+        if not key_down:
+            continue
+        if vk in _VK_ARROWS:
+            chars += (_EXT_MARK + "\xe0" + _VK_ARROWS[vk]) * max(repeat, 1)
+        elif char and char != "\x00":
+            chars += char * max(repeat, 1)
+    return chars
+
+
+def _console_input():
+    """Funzioni e handle della console di input Windows (ctypes), o None se non disponibile."""
+    import ctypes
+    from ctypes import wintypes
+
+    class KEY_EVENT_RECORD(ctypes.Structure):
+        _fields_ = [("bKeyDown", wintypes.BOOL), ("wRepeatCount", wintypes.WORD),
+                    ("wVirtualKeyCode", wintypes.WORD), ("wVirtualScanCode", wintypes.WORD),
+                    ("uChar", wintypes.WCHAR), ("dwControlKeyState", wintypes.DWORD)]
+
+    class _Event(ctypes.Union):
+        # KEY_EVENT_RECORD è il membro più grande che ci serve; il padding copre gli altri tipi
+        _fields_ = [("KeyEvent", KEY_EVENT_RECORD), ("_pad", ctypes.c_byte * 16)]
+
+    class INPUT_RECORD(ctypes.Structure):
+        _fields_ = [("EventType", wintypes.WORD), ("Event", _Event)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # istanza propria: tipi dichiarati qui
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.FlushConsoleInputBuffer.argtypes = [wintypes.HANDLE]
+    kernel32.GetNumberOfConsoleInputEvents.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.ReadConsoleInputW.argtypes = [wintypes.HANDLE, ctypes.POINTER(INPUT_RECORD),
+                                           wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    handle = kernel32.GetStdHandle(_STD_INPUT_HANDLE & 0xFFFFFFFF)
+    mode = wintypes.DWORD()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        return None  # stdin non è una console (es. pipe di un terminale emulato)
+    return ctypes, wintypes, kernel32, handle, INPUT_RECORD
+
+
 class KeyReader:
     """Legge tasti senza bloccare; inattivo se lo stream non e' un terminale."""
 
@@ -68,6 +124,7 @@ class KeyReader:
         self._queue: deque[str] = deque()
         self._old_attrs = None
         self._fd = None
+        self._console = None
         self.active = False
 
     def __enter__(self):
@@ -91,17 +148,16 @@ class KeyReader:
                 self._old_attrs = None
                 self.active = False
         elif self.active:
-            self._drain_windows()
+            try:
+                self._console = _console_input()
+            except Exception:
+                self._console = None
+            if self._console is None:
+                self.active = False
+            else:
+                # Scarta i tasti digitati prima dell'avvio (es. durante la pre-elaborazione)
+                self._console[2].FlushConsoleInputBuffer(self._console[3])
         return self
-
-    def _drain_windows(self) -> None:
-        """Scarta i tasti digitati prima dell'avvio (es. durante la pre-elaborazione)."""
-        try:
-            import msvcrt
-            while msvcrt.kbhit():
-                msvcrt.getwch()
-        except Exception:
-            pass
 
     def __exit__(self, exc_type, exc, tb):
         if self._old_attrs is not None:
@@ -114,15 +170,22 @@ class KeyReader:
         return False
 
     def _read_raw_windows(self) -> str:
-        import msvcrt
-        chars = ""
-        while msvcrt.kbhit():
-            c = msvcrt.getwch()
-            chars += c
-            if c in _WIN_PREFIXES and msvcrt.kbhit():
-                # Seconda parte arrivata subito: e' un tasto esteso, non la lettera "à"
-                chars = chars[:-1] + _EXT_MARK + c + msvcrt.getwch()
-        return chars
+        # ReadConsoleInputW distingue le frecce (virtual key) dalla lettera "à": con
+        # msvcrt.getwch entrambe iniziano con "à" e kbhit non vede il secondo carattere
+        ctypes, wintypes, kernel32, handle, INPUT_RECORD = self._console
+        pending = wintypes.DWORD()
+        if not kernel32.GetNumberOfConsoleInputEvents(handle, ctypes.byref(pending)) or not pending.value:
+            return ""
+        records = (INPUT_RECORD * pending.value)()
+        read = wintypes.DWORD()
+        if not kernel32.ReadConsoleInputW(handle, records, pending.value, ctypes.byref(read)):
+            return ""
+        events = []
+        for record in records[:read.value]:
+            if record.EventType == _KEY_EVENT:  # eventi mouse, focus e ridimensionamento ignorati
+                k = record.Event.KeyEvent
+                events.append((k.bKeyDown, k.wVirtualKeyCode, k.uChar, k.wRepeatCount))
+        return records_to_chars(events)
 
     def _read_raw_posix(self, timeout: float) -> str:
         import select
