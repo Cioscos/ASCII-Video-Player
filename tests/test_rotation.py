@@ -258,3 +258,26 @@ def test_failed_seek_stops_new_pipeline():
     assert made[-1].start_index == 20
     assert made[-1].stopped
     assert src.next_frame() is None
+
+
+def test_rotate_accepts_any_integer_step_with_one_restart():
+    f = Factory()
+    src = RotatingSource(f, 50)
+    src.start()
+    assert src.rotate(2) is True and src.rotation == 180
+    assert len(f.made) == 2 and f.made[0].stopped
+    assert src.rotate(-3) is True and src.rotation == 270
+    assert len(f.made) == 3
+    assert src.rotate(5) is True and src.rotation == 0
+    assert len(f.made) == 4
+
+
+def test_rotate_full_turn_does_nothing():
+    f = Factory()
+    src = RotatingSource(f, 50)
+    src.start()
+    src.next_frame()
+    assert src.rotate(4) is True and src.rotation == 0
+    assert src.rotate(-8) is True
+    assert len(f.made) == 1 and not f.made[0].stopped
+    assert src.next_frame() == (1, b"r0-1")

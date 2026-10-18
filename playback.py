@@ -191,6 +191,14 @@ class _KeyHandler:
         self.should_stop = should_stop
         self.overlay = overlay
         self.interrupted = False  # l'ultima azione ha interrotto il ritmo (pausa, rotazione, seek lento)
+        self.pending = None  # tasto letto durante lo svuotamento, da gestire per primo
+
+    def next_key(self):
+        """Tasto in sospeso, se c'è, altrimenti il prossimo tasto disponibile."""
+        if self.pending is not None:
+            key, self.pending = self.pending, None
+            return key
+        return self.controls.poll()
 
     def handle(self, key, n, last):
         """
@@ -210,11 +218,88 @@ class _KeyHandler:
         if key == "space":
             self.interrupted = True
             return self._pause(n, last)
-        if key in _ROTATE_STEPS:
-            self._rotate(_ROTATE_STEPS[key], n, last)
+        if self._is_slow(key):
+            return self._slow_action(key, n, last)
         if key in _SEEK_SECONDS:
             self._seek(_SEEK_SECONDS[key], n, last)
         return False
+
+    def _can_rotate(self):
+        return hasattr(self.source, "rotate")
+
+    def _can_seek(self):
+        return hasattr(self.source, "seek")
+
+    def _is_slow(self, key):
+        """True per i tasti che avviano un'operazione lenta (rotazione o seek con pipeline)."""
+        if key in _ROTATE_STEPS:
+            return self._can_rotate()
+        return key in _SEEK_SECONDS and self._can_seek() and getattr(self.source, "slow_seek", False)
+
+    def _slow_action(self, key, n, last):
+        """
+        Rotazione e/o seek lenti, accorpando i tasti già in attesa.
+
+        Prima dell'operazione si svuotano i tasti disponibili: i passi di r/R
+        si sommano (modulo 4) e i secondi delle frecce si sommano in un unico
+        seek; un tasto di uscita termina subito, qualsiasi altro tasto ferma lo
+        svuotamento e resta in sospeso. Se ci sono sia rotazione sia seek, si
+        applica prima la rotazione e poi il seek. Dopo l'operazione si scartano
+        r/R e frecce arrivati durante l'attesa (uscita sempre rispettata).
+
+        Returns:
+            bool: True se la riproduzione deve terminare
+        """
+        steps = 0
+        seconds = 0
+        while key is not None:
+            if key in _QUIT_KEYS:
+                return True
+            if key in _ROTATE_STEPS:
+                if self._can_rotate():
+                    steps += _ROTATE_STEPS[key]
+            elif key in _SEEK_SECONDS:
+                if self._can_seek():
+                    seconds += _SEEK_SECONDS[key]
+            else:
+                self.pending = key
+                break
+            key = self.controls.poll()
+
+        net = steps % 4
+        if net == 3:
+            net = -1  # tre quarti di giro orari = un quarto antiorario
+        if net:
+            self._rotate(net, n, last)
+        if seconds:
+            self._seek(seconds, n, last)
+        if net or seconds:
+            return self._discard_repeats()
+        return False
+
+    def _discard_repeats(self):
+        """
+        Scarta r/R e frecce arrivati durante un'operazione lenta.
+
+        Un tasto di uscita termina la riproduzione; il primo altro tasto resta
+        in sospeso. Se c'è già un tasto in sospeso non si legge nulla, per non
+        alterare l'ordine dei tasti premuti prima dell'operazione.
+
+        Returns:
+            bool: True se la riproduzione deve terminare
+        """
+        if self.pending is not None:
+            return False
+        while True:
+            key = self.controls.poll()
+            if key is None:
+                return False
+            if key in _QUIT_KEYS:
+                return True
+            if key in _ROTATE_STEPS or key in _SEEK_SECONDS:
+                continue
+            self.pending = key
+            return False
 
     def _pause(self, n, last):
         """Pausa fino a `space` (ripresa) o `q`/`esc`/should_stop (uscita)."""
@@ -247,7 +332,7 @@ class _KeyHandler:
             self.audio.set_paused(True)
 
     def _rotate(self, step, n, last):
-        """Ruota il video di 90 gradi (r = orario, R = antiorario) se la sorgente lo supporta."""
+        """Ruota il video di step quarti di giro (positivo = orario) se la sorgente lo supporta."""
         if not hasattr(self.source, "rotate"):
             return
         self.interrupted = True
@@ -299,6 +384,9 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     Con `controls` (oggetto con `poll()` e `read(timeout)`) i tasti vengono
     letti una volta per frame: `space` pausa, `q`/`esc` uscita, frecce seek
     (solo se la sorgente ha `seek`), `r`/`R` rotazione (solo se ha `rotate`).
+    Prima di un'operazione lenta (rotazione, seek con `slow_seek`) i tasti
+    ripetuti già in attesa vengono accorpati in una sola operazione, e quelli
+    arrivati durante l'attesa vengono scartati (vedi `_KeyHandler._slow_action`).
 
     Returns:
         int: numero di frame estratti dalla sorgente e disegnati
@@ -320,7 +408,7 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
 
     while not should_stop.is_set():
         if keys is not None:
-            key = controls.poll()
+            key = keys.next_key()
             if key is not None:
                 if keys.handle(key, n, last):
                     break

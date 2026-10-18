@@ -95,7 +95,14 @@ class RotatingSource:
         self._last = index - 1
 
     def rotate(self, step):
-        """Ruota di step * 90 gradi. Restituisce False (invariato) se fallisce."""
+        """
+        Ruota di step * 90 gradi in senso orario (step intero qualsiasi, ridotto modulo 4).
+
+        Un solo riavvio della sorgente qualunque sia step; con step multiplo di 4
+        non fa nulla. Restituisce False (rotazione invariata) se fallisce.
+        """
+        if step % len(ROTATIONS) == 0:
+            return True
         previous = self.rotation
         angle = ROTATIONS[(ROTATIONS.index(previous) + step) % len(ROTATIONS)]
         start = self._last + 1

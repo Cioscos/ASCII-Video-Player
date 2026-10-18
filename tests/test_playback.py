@@ -458,3 +458,127 @@ def test_seek_with_unknown_length_moves_forward_and_clamps_at_zero():
     run_playback(UnknownLengthSource(make(100)), 10, d, threading.Event(), loop=False,
                  clock=make_clock(10, ft), controls=keys)
     assert d.drawn[:7] == [0, 1, 2, 52, 53, 0, 1]
+
+
+class BufferKeys:
+    """Tastiera finta con buffer: i tasti arrivano quando il test li inserisce."""
+
+    def __init__(self, after_pause=()):
+        from collections import deque
+        self.buffer = deque()
+        self.after_pause = list(after_pause)
+        self.paused = 0
+
+    def push(self, *keys):
+        self.buffer.extend(keys)
+
+    def poll(self):
+        return self.buffer.popleft() if self.buffer else None
+
+    def read(self, timeout):
+        self.paused += 1
+        return self.after_pause.pop(0) if self.after_pause else "space"
+
+
+class RecordingRotatable(RotatableListSource):
+    """RotatableListSource che registra i seek e può ricevere tasti durante le attese."""
+
+    def __init__(self, frames, keys, during=(), **kw):
+        super().__init__(frames, **kw)
+        self.keys = keys
+        self.during = list(during)
+        self.seeks = []
+
+    def rotate(self, step):
+        self.keys.push(*self.during)
+        return super().rotate(step)
+
+    def seek(self, index):
+        self.seeks.append(index)
+        if self.slow_seek:
+            self.keys.push(*self.during)
+        super().seek(index)
+
+
+def _run_buffered(n_frames, pushed, during=(), after_pause=(), slow_seek=False):
+    ft = FakeTime()
+    keys = BufferKeys(after_pause)
+    src = RecordingRotatable(make(n_frames), keys, during=during, slow_seek=slow_seek)
+    d = RecordingDisplay(on_show=lambda k: keys.push(*pushed) if k == 2 else None)
+    run_playback(src, 10, d, threading.Event(), loop=False, clock=make_clock(10, ft), controls=keys)
+    return src, d, keys
+
+
+def test_repeated_r_rotates_once_with_net_step():
+    src, d, _ = _run_buffered(10, ["r", "r"])
+    assert src.rotate_calls == [2]
+    assert d.overlays[2] == ["Rotazione 180°…"]
+    assert d.invalidations == 1
+
+
+def test_r_then_shift_r_does_not_rotate():
+    src, d, _ = _run_buffered(10, ["r", "R"])
+    assert src.rotate_calls == []
+    assert d.invalidations == 0
+    assert d.drawn == list(range(10))
+
+
+def test_three_r_rotate_counterclockwise_once():
+    src, d, _ = _run_buffered(10, ["r", "r", "r"])
+    assert src.rotate_calls == [-1]
+    assert d.overlays[2] == ["Rotazione 270°…"]
+
+
+def test_r_then_q_quits_without_rotating():
+    src, d, _ = _run_buffered(10, ["r", "q"])
+    assert src.rotate_calls == []
+    assert d.drawn == [0, 1]
+
+
+def test_keys_during_rotation_are_discarded():
+    src, d, keys = _run_buffered(10, ["r"], during=["r", "R", "right", "up"])
+    assert src.rotate_calls == [1]
+    assert src.seeks == []
+    assert not keys.buffer
+
+
+def test_quit_during_rotation_is_honored():
+    src, d, _ = _run_buffered(10, ["r"], during=["r", "q"])
+    assert src.rotate_calls == [1]
+    assert d.drawn == [0, 1, 1]  # attesa della rotazione, poi uscita
+
+
+def test_space_during_rotation_stays_pending():
+    src, d, keys = _run_buffered(10, ["r"], during=["r", "space"], after_pause=["space"])
+    assert src.rotate_calls == [1]
+    assert keys.paused == 1
+    assert PAUSE_TEXT in d.overlays[4]  # dopo il primo frame ruotato
+
+
+def test_space_after_r_is_handled_next():
+    src, d, keys = _run_buffered(10, ["r", "space", "r"], after_pause=["space"])
+    assert src.rotate_calls == [1, 1]  # il secondo r arriva dopo la ripresa
+    assert keys.paused == 1
+
+
+def test_repeated_arrows_with_slow_seek_seek_once():
+    src, d, _ = _run_buffered(300, ["right", "right", "right"], slow_seek=True)
+    assert src.seeks == [1 + 150]
+    assert d.overlays[2] == [SEEK_WAIT_TEXT]
+
+
+def test_keys_during_slow_seek_are_discarded():
+    src, d, keys = _run_buffered(300, ["right"], during=["right", "r"], slow_seek=True)
+    assert src.seeks == [51]
+    assert src.rotate_calls == []
+
+
+def test_rotation_and_seek_drained_together_rotate_then_seek():
+    src, d, _ = _run_buffered(300, ["r", "right", "r", "right"], slow_seek=True)
+    assert src.rotate_calls == [2]
+    assert src.seeks == [1 + 100]
+
+
+def test_fast_seek_keeps_one_key_per_frame():
+    src, d, _ = _run_buffered(300, ["right", "right"])
+    assert src.seeks == [51, 101]
