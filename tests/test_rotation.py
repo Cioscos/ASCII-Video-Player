@@ -241,3 +241,20 @@ def test_close_stops_current_pipeline_and_is_idempotent():
     src.close()
     src.close()
     assert f.made[0].stopped
+
+
+def test_failed_seek_stops_new_pipeline():
+    made = []
+
+    def make(rotation, start):
+        p = FakePipeline(rotation, start, fail=start == 20)
+        made.append(p)
+        return p
+
+    src = RotatingSource(make, 50)
+    src.start()
+    src.rotate(+1)
+    src.seek(20)
+    assert made[-1].start_index == 20
+    assert made[-1].stopped
+    assert src.next_frame() is None

@@ -90,6 +90,7 @@ class RotatingSource:
             try:
                 self._launch(self.rotation, index, wait=True)
             except Exception:
+                self._stop_pipeline()
                 self._failed = True
         self._last = index - 1
 
