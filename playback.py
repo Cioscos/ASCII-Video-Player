@@ -49,6 +49,19 @@ class FrameDecimator:
             return True
         return math.floor(source_index * self.ratio + 1e-9) > math.floor((source_index - 1) * self.ratio + 1e-9)
 
+    def source_index(self, decimated_index):
+        """Indice sorgente del frame decimato `decimated_index` (inverso di `should_keep`)."""
+        if self.ratio >= 1.0 or decimated_index <= 0:
+            return max(0, int(decimated_index))
+        # Formula chiusa: il frame decimato i è il primo sorgente s con floor(s * ratio) >= i
+        s = max(0, math.ceil((decimated_index - 1e-9) / self.ratio))
+        # Correzione degli errori di arrotondamento in virgola mobile
+        while s > 0 and not self.should_keep(s):
+            s += 1
+        while s > 1 and self.should_keep(s - 1) and math.floor((s - 1) * self.ratio + 1e-9) >= decimated_index:
+            s -= 1
+        return s
+
 
 class PlaybackClock:
     """

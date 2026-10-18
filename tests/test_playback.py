@@ -1,7 +1,9 @@
 import threading
 
+import pytest
+
 from fps_stats import FpsStats
-from playback import (PAUSE_TEXT, SEEK_UNAVAILABLE_TEXT, PlaybackClock, run_playback,
+from playback import (PAUSE_TEXT, SEEK_UNAVAILABLE_TEXT, FrameDecimator, PlaybackClock, run_playback,
                       seek_target)
 from tests.fakes import FakeTime
 
@@ -338,3 +340,10 @@ def test_pause_time_not_recorded_in_fps_stats():
     assert ft.now() > 10.0
     assert len(stats._times) == 8  # 10 frame disegnati, intervallo a cavallo della pausa escluso
     assert max(stats._times) < 1.0
+
+
+@pytest.mark.parametrize("src,target", [(24.0, 12), (30.0, 24), (60.0, 25), (25.0, 60), (float("nan"), 30)])
+def test_source_index_inverts_should_keep(src, target):
+    d = FrameDecimator(src, target)
+    kept = [s for s in range(300) if d.should_keep(s)]
+    assert [d.source_index(i) for i in range(len(kept))] == kept
