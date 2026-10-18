@@ -88,7 +88,7 @@ Il menu ha cinque schermate: **Riproduci** (riproduce il video selezionato), **V
 | `Giù` / `Su` | Seek -30 s / +30 s |
 | `r` / `R` | Ruota di 90° in senso orario / antiorario |
 
-Seek e rotazione funzionano in entrambe le modalità. Con `--high-performance` a 0° sono immediati (cache); da ruotato, e in modalità standard, il video viene decodificato dal vivo, quindi un seek o una rotazione richiedono circa 1-2 s (nel frattempo compare "Seek…" / "Rotazione N°…"). A 90°/270° la larghezza può ridursi per stare nel terminale.
+Seek e rotazione funzionano in entrambe le modalità. Con `--high-performance` a 0° sono immediati (cache); da ruotato, e in modalità standard, il video viene decodificato dal vivo, quindi un seek o una rotazione richiedono circa 1-2 s (nel frattempo compare "Seek…" / "Rotazione N°…"). A 90°/270° la larghezza può ridursi per stare nel terminale. Le pressioni ripetute di rotazione o seek vengono accorpate in un'unica operazione, e quelle premute durante il caricamento vengono ignorate. In pausa funzionano solo `Spazio` (riprendi) e `q`/`Esc` (esci): i tasti di rotazione e seek vengono ignorati.
 
 ### Esempi
 

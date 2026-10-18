@@ -356,9 +356,14 @@ def decimated_total(frame_count, source_fps, target_fps):
     """Numero di frame tenuti dal decimatore fra i `frame_count` frame sorgente."""
     if frame_count <= 0:
         return 0
+    import math
     from playback import FrameDecimator
-    decimator = FrameDecimator(source_fps, target_fps)
-    return sum(1 for i in range(int(frame_count)) if decimator.should_keep(i))
+    n = int(frame_count)
+    ratio = FrameDecimator(source_fps, target_fps).ratio
+    if ratio >= 1.0:
+        return n
+    # Forma chiusa di sum(should_keep(i) for i in range(n)): la somma è telescopica
+    return math.floor((n - 1) * ratio + 1e-9) + 1
 
 
 def make_pipeline_factory(args, src_w, src_h, source_fps, ascii_palette):
@@ -462,7 +467,8 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     Args:
         args (argparse.Namespace): Gli argomenti parsati
         video_info (tuple): (frame, fps_originale, frame_totali)
-        ascii_dimensions (tuple): (width, height)
+        ascii_dimensions (tuple): (width, height); non usato, le dimensioni
+            sono calcolate dalla fabbrica di pipeline
         ascii_palette (str): Palette ASCII da utilizzare
         logger (logging.Logger): Logger configurato
 
@@ -470,11 +476,9 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
         int: Codice di uscita (0 per successo, altro valore per errore)
     """
     from fps_stats import FpsStats
-    from playback import run_playback
+    from playback import FrameDecimator, run_playback
     from terminal_display import TerminalDisplay
 
-    width, height = ascii_dimensions
-    from playback import FrameDecimator
     source_fps = video_info[1]
     src_h, src_w = video_info[0].shape[:2]
     effective_fps = FrameDecimator(source_fps, args.fps).effective_fps
@@ -501,7 +505,8 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
                 audio = _start_audio(args.video_path, effective_fps, logger)
 
             drawn = run_playback(source, effective_fps, display, threading.Event(),
-                                 loop=False, stats=stats, audio=audio, controls=keys)
+                                 loop=False, stats=stats, audio=audio, controls=keys,
+                                 seek_loop=not args.no_loop)
             logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
         except KeyboardInterrupt:
             logger.info("Interruzione da tastiera")

@@ -1,4 +1,4 @@
-"""Funzioni pure per la rotazione del video in riproduzione."""
+"""Rotazione del video in riproduzione: dimensioni ruotate e RotatingSource (cache o pipeline dal vivo)."""
 
 from ascii_converter import auto_width, compute_ascii_height
 
@@ -154,9 +154,12 @@ class RotatingSource:
         self.rotation = rotation
         if rotation == 0 and self._cache is not None:
             self._cache.seek(start)
+            self._failed = False
             return
         try:
             self._launch(rotation, start)
         except Exception:
             self._stop_pipeline()
             self._failed = True
+        else:
+            self._failed = False  # la sorgente ripristinata riparte da start

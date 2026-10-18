@@ -159,6 +159,21 @@ def test_decimated_total_matches_should_keep():
     assert main.decimated_total(-5, 60.0, 25) == 0
 
 
+@pytest.mark.parametrize("src,target", [(23.976, 12), (29.97, 24), (60.0, 25), (24.0, 12), (30.0, 60),
+                                        (float("nan"), 30), (0.0, 30)])
+@pytest.mark.parametrize("n", [1, 2, 3, 47, 48, 1001, 7200])
+def test_decimated_total_closed_form_matches_should_keep(src, target, n):
+    from playback import FrameDecimator
+    d = FrameDecimator(src, target)
+    assert main.decimated_total(n, src, target) == sum(d.should_keep(i) for i in range(n))
+
+
+def test_decimated_total_is_constant_time(monkeypatch):
+    from playback import FrameDecimator
+    monkeypatch.setattr(FrameDecimator, "should_keep", lambda *a: (_ for _ in ()).throw(AssertionError("O(n)")))
+    assert main.decimated_total(10 ** 9, 60.0, 25) > 0
+
+
 def test_controls_hint_lists_rotation_in_both_modes():
     assert main.CONTROLS_HINT == main.CONTROLS_HINT_HP
     assert "r/R ruota" in main.CONTROLS_HINT and "←/→" in main.CONTROLS_HINT

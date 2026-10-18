@@ -56,7 +56,7 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
         target_fps (float | None): FPS richiesti
         frame_queue (multiprocessing.Queue): Coda dei frame ridimensionati
         should_stop (multiprocessing.Event): Evento di terminazione
-        batch_size (int): Numero di frame per batch
+        batch_size (int): Numero di frame per batch (il primo batch di ogni avvio ne ha uno solo)
         loop_video (bool): Se True, riavvia il video alla fine
         rotation (int): Rotazione oraria in gradi (0, 90, 180, 270)
         start_index (int): Indice decimato da cui iniziare (posizionamento del video)
@@ -94,11 +94,15 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
         if start_index > 0:
             logger.info(f"Posizionamento al frame sorgente {source_index} (indice decimato {start_index}), "
                         f"rotazione {rotation}°")
-            video.set(cv2.CAP_PROP_POS_FRAMES, source_index)
+            if not video.set(cv2.CAP_PROP_POS_FRAMES, source_index):
+                logger.warning(f"Posizionamento al frame sorgente {source_index} non riuscito")
         elif rotation:
             logger.info(f"Rotazione {rotation}°")
         grabbed_in_lap = 0
         offset_lap = start_index > 0  # il giro corrente non parte da 0
+        # Il primo batch di ogni avvio parte con un solo frame, così il primo
+        # frame compare subito; i successivi (anche dopo il loop) sono interi
+        limit = 1
         while not should_stop.is_set():
             if not video.grab():
                 if batch:
@@ -134,10 +138,11 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
                 resized = cv2.rotate(resized, rotate_code)
             batch.append((decimated_index, resized))
             decimated_index += 1
-            if len(batch) >= batch_size:
+            if len(batch) >= limit:
                 if not put_until_stopped(frame_queue, batch, should_stop):
                     break
                 batch = []
+                limit = batch_size
     except KeyboardInterrupt:
         should_stop.set()
     except Exception as e:
@@ -289,7 +294,7 @@ class VideoPipeline:
             height (int): Altezza della griglia ASCII
             source_fps (float): FPS del video sorgente
             target_fps (float | None): FPS richiesti
-            batch_size (int): Numero di frame per batch
+            batch_size (int): Numero di frame per batch (il primo batch di ogni avvio ne ha uno solo)
             palette (str): Caratteri della palette, 'box' oppure 'half'
             loop_video (bool): Se True, il video riparte alla fine
             log_performance (bool): Se True, il converter logga i tempi di conversione
@@ -335,7 +340,8 @@ class VideoPipeline:
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
             args=(self.video_path, self.width, self.resize_height, self.source_fps, self.target_fps,
-                  self.frame_queue, self.should_stop, self.batch_size, self.loop_video, self.rotation, self.start_index),
+                  self.frame_queue, self.should_stop, self.batch_size, self.loop_video,
+                  self.rotation, self.start_index),
             daemon=True,
         )
         self.converter_process = multiprocessing.Process(

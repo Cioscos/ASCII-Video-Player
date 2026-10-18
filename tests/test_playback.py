@@ -582,3 +582,22 @@ def test_rotation_and_seek_drained_together_rotate_then_seek():
 def test_fast_seek_keeps_one_key_per_frame():
     src, d, _ = _run_buffered(300, ["right", "right"])
     assert src.seeks == [51, 101]
+
+
+def test_seek_loop_overrides_loop_for_seek_only():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    src = SeekableListSource(make(20))
+    run_playback(src, 10, d, threading.Event(), loop=False, seek_loop=True,
+                 clock=make_clock(10, ft), controls=FakeKeys({7: "up"}))
+    assert d.drawn == [0, 1, 2, 3, 4, 5] + list(range(20))  # seek a 0, poi fine senza restart
+    assert src.restarts == 0
+
+
+def test_seek_loop_false_clamps_with_loop_on():
+    ft = FakeTime()
+    stop = threading.Event()
+    d = RecordingDisplay(on_show=lambda k: stop.set() if k == 8 else None)
+    run_playback(SeekableListSource(make(20)), 10, d, stop, loop=True, seek_loop=False,
+                 clock=make_clock(10, ft), controls=FakeKeys({7: "up"}))
+    assert d.drawn == [0, 1, 2, 3, 4, 5, 19, 0]

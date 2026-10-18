@@ -88,7 +88,7 @@ The menu has five screens: **Riproduci** (play the selected video), **Video** (p
 | `Down` / `Up` | Seek -30 s / +30 s |
 | `r` / `R` | Rotate 90° clockwise / counter-clockwise |
 
-Seeking and rotation work in both modes. With `--high-performance` at 0° they are instant (cache); when rotated, and in standard mode, the video is decoded live, so a seek or rotation takes about 1-2 s ("Seek…" / "Rotazione N°…" is shown meanwhile). At 90°/270° the width may shrink to fit the terminal.
+Seeking and rotation work in both modes. With `--high-performance` at 0° they are instant (cache); when rotated, and in standard mode, the video is decoded live, so a seek or rotation takes about 1-2 s ("Seek…" / "Rotazione N°…" is shown meanwhile). At 90°/270° the width may shrink to fit the terminal. Repeated rotation or seek presses are merged into a single operation, and those pressed while it is loading are ignored. While paused only `Space` (resume) and `q`/`Esc` (quit) work: rotation and seek keys are ignored.
 
 ### Examples
 

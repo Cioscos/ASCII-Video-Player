@@ -281,3 +281,24 @@ def test_rotate_full_turn_does_nothing():
     assert src.rotate(-8) is True
     assert len(f.made) == 1 and not f.made[0].stopped
     assert src.next_frame() == (1, b"r0-1")
+
+
+def test_successful_restore_clears_failed_seek():
+    made = []
+
+    def make(rotation, start):
+        # falliscono il seek a 20 (90 gradi) e la rotazione a 180 gradi; il ripristino riesce
+        p = FakePipeline(rotation, start, fail=(start == 20 and rotation == 90 and len(made) == 2)
+                         or rotation == 180)
+        made.append(p)
+        return p
+
+    src = RotatingSource(make, 50)
+    src.start()
+    assert src.rotate(+1) is True
+    src.seek(20)
+    assert src.next_frame() is None
+    assert src.rotate(+1) is False
+    assert src.rotation == 90
+    assert (made[-1].rotation, made[-1].start_index) == (90, 20)
+    assert src.next_frame() == (20, b"r90-20")

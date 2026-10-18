@@ -373,7 +373,7 @@ class _KeyHandler:
 
 def run_playback(source, fps, display, should_stop: threading.Event, loop,
                  stats=None, audio=None, clock: Optional[PlaybackClock] = None,
-                 controls=None) -> int:
+                 controls=None, seek_loop=None) -> int:
     """
     Loop di riproduzione comune a entrambe le modalità.
 
@@ -387,6 +387,10 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     Prima di un'operazione lenta (rotazione, seek con `slow_seek`) i tasti
     ripetuti già in attesa vengono accorpati in una sola operazione, e quelli
     arrivati durante l'attesa vengono scartati (vedi `_KeyHandler._slow_action`).
+
+    `seek_loop` decide se un seek in avanti oltre la fine torna a 0 (True) o si
+    ferma all'ultimo frame (False); None usa `loop`. Serve quando il loop è
+    gestito dalla sorgente (modalità standard) e run_playback riceve loop=False.
 
     Returns:
         int: numero di frame estratti dalla sorgente e disegnati
@@ -404,7 +408,8 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
     overlay_state = _Overlay()
     keys = None
     if controls is not None:
-        keys = _KeyHandler(controls, source, fps, loop, display, clock, audio, should_stop, overlay_state)
+        keys = _KeyHandler(controls, source, fps, loop if seek_loop is None else seek_loop,
+                           display, clock, audio, should_stop, overlay_state)
 
     while not should_stop.is_set():
         if keys is not None:
