@@ -142,3 +142,10 @@ def test_menu_keyboard_interrupt_in_play_returns_to_menu(monkeypatch, tmp_path):
     _run_menu_with_keys(monkeypatch, tmp_path, ["enter", "esc"], interrupted)
     assert main.main([]) == 0
     assert len(calls) == 1
+
+
+def test_menu_frame_overwrites_in_place_without_clearing():
+    # \033[2J su Windows Terminal sposta lo schermo nello scrollback: il menu si sovrascrive
+    frame = main.menu_frame("Pixellator\n> Riproduci")
+    assert "\033[2J" not in frame
+    assert frame == "\033[HPixellator\033[K\n> Riproduci\033[K\033[J"

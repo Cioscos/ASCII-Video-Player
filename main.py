@@ -17,6 +17,10 @@ HIDE_CURSOR = '\033[?25l'
 RESET_AND_SHOW_CURSOR = '\033[0m\033[?25h'
 # Pulizia schermo e cursore in alto a sinistra
 CLEAR_SCREEN = '\033[2J\033[H'
+# Cursore in alto a sinistra, fine riga e fine schermo cancellati (sovrascrittura sul posto)
+CURSOR_HOME = '\033[H'
+ERASE_LINE_END = '\033[K'
+ERASE_BELOW = '\033[J'
 
 # Palette 'extended' (67 caratteri), esposta a livello di modulo per i test
 EXTENDED = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@"
@@ -567,6 +571,16 @@ USAGE = ("Uso: python main.py <video> [larghezza] [opzioni]  "
          "(senza argomenti apre il menu in un terminale interattivo)")
 
 
+def menu_frame(text):
+    """
+    Sequenza che ridisegna il menu sovrascrivendo lo schermo sul posto.
+
+    Non usa CLEAR_SCREEN: su Windows Terminal/conhost \\033[2J sposta lo schermo
+    nello scrollback, che crescerebbe a ogni tasto premuto.
+    """
+    return CURSOR_HOME + (ERASE_LINE_END + "\n").join(text.split("\n")) + ERASE_LINE_END + ERASE_BELOW
+
+
 def run_menu():
     """
     Esegue il menu interattivo.
@@ -588,12 +602,13 @@ def run_menu():
     try:
         while True:
             action = None
+            sys.stdout.write(CLEAR_SCREEN)  # una volta all'ingresso, poi sovrascrittura sul posto
             with KeyReader() as keys:
                 redraw = True
                 while action is None:
                     if redraw:
                         cols, rows = get_terminal_size()
-                        sys.stdout.write(CLEAR_SCREEN + render_menu(state, cols, rows))
+                        sys.stdout.write(menu_frame(render_menu(state, cols, rows)))
                         sys.stdout.flush()
                         redraw = False
                     key = keys.read(0.1)
