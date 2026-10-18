@@ -12,8 +12,12 @@ SEEK_LONG_S = 30
 PAUSE_TEXT = "⏸ In pausa"
 SEEK_UNAVAILABLE_TEXT = "Seek disponibile solo con --high-performance"
 STATUS_SECONDS = 2.0
+ROTATING_TEXT = "Rotazione {}°…"
+ROTATE_FAILED_TEXT = "Rotazione non riuscita"
+SEEK_WAIT_TEXT = "Seek…"
 
 _QUIT_KEYS = ("q", "esc")
+_ROTATE_STEPS = {"r": 1, "R": -1}
 _SEEK_SECONDS = {"left": -SEEK_SHORT_S, "right": SEEK_SHORT_S, "down": -SEEK_LONG_S, "up": SEEK_LONG_S}
 
 
@@ -183,6 +187,7 @@ class _KeyHandler:
         self.audio = audio
         self.should_stop = should_stop
         self.overlay = overlay
+        self.interrupted = False  # l'ultima azione ha interrotto il ritmo (pausa, rotazione, seek lento)
 
     def handle(self, key, n, last):
         """
@@ -196,10 +201,14 @@ class _KeyHandler:
         Returns:
             bool: True se la riproduzione deve terminare
         """
+        self.interrupted = False
         if key in _QUIT_KEYS:
             return True
         if key == "space":
+            self.interrupted = True
             return self._pause(n, last)
+        if key in _ROTATE_STEPS:
+            self._rotate(_ROTATE_STEPS[key], n, last)
         if key in _SEEK_SECONDS:
             self._seek(_SEEK_SECONDS[key], n, last)
         return False
@@ -227,6 +236,31 @@ class _KeyHandler:
         logger.info("Riproduzione ripresa")
         return False
 
+    def _wait_screen(self, text, last):
+        """Mostra l'ultimo frame con la riga di attesa e mette in pausa l'audio."""
+        if last is not None:
+            self.display.show(last[1], self.overlay.lines(text))
+        if self.audio is not None:
+            self.audio.set_paused(True)
+
+    def _rotate(self, step, n, last):
+        """Ruota il video di 90 gradi (r = orario, R = antiorario) se la sorgente lo supporta."""
+        if not hasattr(self.source, "rotate"):
+            return
+        self.interrupted = True
+        target = (getattr(self.source, "rotation", 0) + 90 * step) % 360
+        self._wait_screen(ROTATING_TEXT.format(target), last)
+        ok = self.source.rotate(step)
+        self.display.invalidate()  # le dimensioni del frame cambiano: ridisegno completo
+        self.overlay.dirty = True
+        if not ok:
+            self.overlay.set_status(ROTATE_FAILED_TEXT, self.clock.now())
+        self.clock.rebase(n)
+        if self.audio is not None:
+            self.audio.seek(((last[0] + 1) if last is not None else 0) / self.fps)
+            self.audio.set_paused(False)
+        logger.info("Rotazione di %+d° (angolo %d, esito %s)", 90 * step, target, ok)
+
     def _seek(self, seconds, n, last):
         """Seek di `seconds` secondi rispetto all'ultimo frame disegnato."""
         if not hasattr(self.source, "seek"):
@@ -234,10 +268,18 @@ class _KeyHandler:
             return
         current = last[0] if last is not None else 0
         target = seek_target(current, round(seconds * self.fps), len(self.source), self.loop)
+        slow = getattr(self.source, "slow_seek", False)
+        if slow:
+            self.interrupted = True
+            self._wait_screen(SEEK_WAIT_TEXT, last)
         self.source.seek(target)
         self.clock.rebase(n)  # il frame di destinazione viene disegnato subito
         if self.audio is not None:
             self.audio.seek(target / self.fps)
+            if slow:
+                self.audio.set_paused(False)
+        if slow:
+            self.overlay.dirty = True  # toglie la riga di attesa
         logger.info("Seek di %+ds: frame %d → %d", seconds, current, target)
 
 
@@ -253,7 +295,7 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
 
     Con `controls` (oggetto con `poll()` e `read(timeout)`) i tasti vengono
     letti una volta per frame: `space` pausa, `q`/`esc` uscita, frecce seek
-    (solo se la sorgente ha `seek`).
+    (solo se la sorgente ha `seek`), `r`/`R` rotazione (solo se ha `rotate`).
 
     Returns:
         int: numero di frame estratti dalla sorgente e disegnati
@@ -279,8 +321,8 @@ def run_playback(source, fps, display, should_stop: threading.Event, loop,
             if key is not None:
                 if keys.handle(key, n, last):
                     break
-                if key == "space":
-                    last_draw = None  # l'intervallo a cavallo della pausa non entra nelle statistiche
+                if keys.interrupted:
+                    last_draw = None  # l'intervallo a cavallo di pausa, rotazione o seek lento non entra nelle statistiche
 
         fetch_start = clock.now()
         item = source.next_frame()

@@ -3,8 +3,8 @@ import threading
 import pytest
 
 from fps_stats import FpsStats
-from playback import (PAUSE_TEXT, SEEK_UNAVAILABLE_TEXT, FrameDecimator, PlaybackClock, run_playback,
-                      seek_target)
+from playback import (PAUSE_TEXT, ROTATE_FAILED_TEXT, SEEK_UNAVAILABLE_TEXT, SEEK_WAIT_TEXT, FrameDecimator,
+                      PlaybackClock, run_playback, seek_target)
 from tests.fakes import FakeTime
 
 
@@ -37,6 +37,10 @@ class RecordingDisplay:
         self.on_show = on_show
         self.drawn = []
         self.overlays = []
+        self.invalidations = 0
+
+    def invalidate(self):
+        self.invalidations += 1
 
     def show(self, frame, overlay=None):
         self.drawn.append(int.from_bytes(frame, "big"))
@@ -340,6 +344,92 @@ def test_pause_time_not_recorded_in_fps_stats():
     assert ft.now() > 10.0
     assert len(stats._times) == 8  # 10 frame disegnati, intervallo a cavallo della pausa escluso
     assert max(stats._times) < 1.0
+
+
+class RotatableListSource(SeekableListSource):
+    """SeekableListSource con rotazione, come RotatingSource."""
+
+    def __init__(self, frames, result=True, slow_seek=False, ft=None, advance=0.0):
+        super().__init__(frames)
+        self.rotation = 0
+        self.rotate_calls = []
+        self.result = result
+        self.slow_seek = slow_seek
+        self.ft = ft
+        self.advance = advance
+
+    def rotate(self, step):
+        self.rotate_calls.append(step)
+        if self.ft is not None:
+            self.ft.advance(self.advance)
+        return self.result
+
+
+def _run_rotate(key, **kw):
+    ft = FakeTime()
+    d = RecordingDisplay()
+    a = FakeAudio()
+    src = RotatableListSource(make(10), ft=ft, **kw)
+    run_playback(src, 10, d, threading.Event(), loop=False, audio=a, clock=make_clock(10, ft),
+                 controls=FakeKeys({3: key}))
+    return src, d, a
+
+
+def test_r_rotates_clockwise_and_redraws():
+    src, d, _ = _run_rotate("r")
+    assert src.rotate_calls == [1]
+    assert d.overlays[2] == ["Rotazione 90°…"]
+    assert d.invalidations == 1
+    assert d.overlays[3] == []  # overlay ridisegnato senza la riga di attesa
+
+
+def test_shift_r_rotates_counterclockwise():
+    src, d, _ = _run_rotate("R")
+    assert src.rotate_calls == [-1]
+    assert d.overlays[2] == ["Rotazione 270°…"]
+
+
+def test_rotation_pauses_and_resyncs_audio():
+    _, _, a = _run_rotate("r")
+    events = [e for e in a.events if e[0] != "time"]
+    assert events == [("paused", True), ("seek", 0.2), ("paused", False)]
+
+
+def test_rotation_failure_shows_status():
+    _, d, _ = _run_rotate("r", result=False)
+    assert any(o and ROTATE_FAILED_TEXT in o for o in d.overlays[3:])
+
+
+def test_rotation_interval_not_in_stats():
+    ft = FakeTime()
+    stats = FpsStats(10)
+    src = RotatableListSource(make(10), ft=ft, advance=2.0)
+    run_playback(src, 10, RecordingDisplay(), threading.Event(), loop=False, stats=stats,
+                 clock=make_clock(10, ft), controls=FakeKeys({3: "r"}))
+    assert ft.now() > 2.0
+    assert stats._times and max(stats._times) < 1.0
+
+
+def test_slow_seek_shows_wait_and_pauses_audio():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    a = FakeAudio()
+    src = RotatableListSource(make(100), slow_seek=True)
+    run_playback(src, 10, d, threading.Event(), loop=False, audio=a, clock=make_clock(10, ft),
+                 controls=FakeKeys({3: "right"}))
+    assert d.overlays[2] == [SEEK_WAIT_TEXT]
+    events = [e for e in a.events if e[0] != "time"]
+    assert events == [("paused", True), ("seek", 5.1), ("paused", False)]
+    assert d.invalidations == 0
+
+
+def test_r_ignored_without_rotate():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    run_playback(ListSource(make(10)), 10, d, threading.Event(), loop=False, clock=make_clock(10, ft),
+                 controls=FakeKeys({3: "r"}))
+    assert d.drawn == list(range(10))
+    assert d.invalidations == 0
 
 
 @pytest.mark.parametrize("src,target", [(24.0, 12), (30.0, 24), (60.0, 25), (25.0, 60), (float("nan"), 30)])
