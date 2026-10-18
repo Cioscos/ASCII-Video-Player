@@ -1,5 +1,9 @@
 import io
 
+import cv2
+import numpy as np
+import pytest
+
 from ascii_converter import make_converter
 from pipeline import VideoPipeline
 from playback import run_playback
@@ -76,3 +80,101 @@ def test_half_truecolor_pipeline_matches_converter(tiny_video):
         p.stop()
     conv = make_converter(16, 6, "half", truecolor=True)
     assert first[0] == 0 and first[1] == conv.convert_frame(nth_kept_frame(tiny_video, 0))
+
+
+@pytest.fixture
+def marked_video(tmp_path):
+    """Video MJPG 24 fps, 48 frame 64x48: blu = i*5 % 256, quadrato bianco 16x12 in alto a sinistra."""
+    path = str(tmp_path / "marked.avi")
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 24, (64, 48))
+    assert writer.isOpened()
+    for i in range(48):
+        frame = np.zeros((48, 64, 3), dtype=np.uint8)
+        frame[:] = (i * 5 % 256, 0, 0)
+        frame[:12, :16] = 255
+        writer.write(frame)
+    writer.release()
+    return path
+
+
+def run_reader(monkeypatch, video, width, height, queue_cls=None, stop=None, **kw):
+    """Esegue frame_reader_process nel processo di test e restituisce [(indice, ndarray)]."""
+    import queue, signal, threading
+    from pipeline import END_OF_VIDEO_MARKER, frame_reader_process
+    monkeypatch.setattr(signal, "signal", lambda *a: None)  # non disattivare Ctrl+C di pytest
+    q = (queue_cls or queue.Queue)()
+    stop = stop or threading.Event()
+    frame_reader_process(video, width, height, 24.0, 12, q, stop, 100, kw.pop("loop", False), **kw)
+    out = []
+    while True:
+        try:
+            item = q.get_nowait()
+        except queue.Empty:
+            break
+        if item == END_OF_VIDEO_MARKER:
+            break
+        out.extend(item)
+    return out
+
+
+def test_reader_rotates_clockwise_90(monkeypatch, marked_video):
+    frames = run_reader(monkeypatch, marked_video, 24, 32, rotation=90)
+    img = frames[0][1]
+    assert img.shape[:2] == (32, 24)
+    assert img[1, -2].min() > 200 and img[-2, 1].max() < 60   # marcatore in alto a destra
+
+
+def test_reader_rotates_180_and_270(monkeypatch, marked_video):
+    assert run_reader(monkeypatch, marked_video, 32, 24, rotation=180)[0][1][-2, -2].min() > 200
+    img = run_reader(monkeypatch, marked_video, 24, 32, rotation=270)[0][1]
+    assert img.shape[:2] == (32, 24) and img[-2, 1].min() > 200   # in basso a sinistra
+
+
+def test_reader_starts_at_index(monkeypatch, marked_video):
+    frames = run_reader(monkeypatch, marked_video, 32, 24, start_index=10)
+    assert [i for i, _ in frames] == list(range(10, 24))
+    expected = nth_kept_frame(marked_video, 10)
+    assert abs(int(frames[0][1][20, 28, 0]) - int(expected[0, 63, 0])) < 12
+
+
+def test_reader_start_past_end(monkeypatch, marked_video):
+    assert run_reader(monkeypatch, marked_video, 32, 24, start_index=500) == []
+
+
+def test_reader_start_past_end_with_loop_restarts(monkeypatch, marked_video):
+    import queue
+    import threading
+    stop = threading.Event()
+
+    class StoppingQueue(queue.Queue):
+        def put(self, item, *a, **k):
+            super().put(item, *a, **k)
+            stop.set()
+
+        def cancel_join_thread(self):
+            pass
+
+    frames = run_reader(monkeypatch, marked_video, 32, 24, queue_cls=StoppingQueue, stop=stop,
+                        loop=True, start_index=500)
+    assert frames and frames[0][0] == 0
+
+
+def test_half_rotated_pipeline_rows(tiny_video):
+    p = VideoPipeline(tiny_video, 20, 16, 24.0, 12, 4, "half", loop_video=False, rotation=90); p.start()
+    try:
+        idx, frame = p.frame_source().next_frame()
+    finally:
+        p.stop()
+    assert idx == 0 and frame.count(b"\n") == 16 - 1
+
+
+def test_next_frame_timeout_raises():
+    import logging
+    import queue
+    import threading
+    from types import SimpleNamespace
+    from pipeline import _PipelineFrameSource
+    fake = SimpleNamespace(ascii_queue=queue.Queue(), should_stop=threading.Event(),
+                           workers_alive=lambda: True, logger=logging.getLogger("fake"))
+    with pytest.raises(TimeoutError):
+        _PipelineFrameSource(fake).next_frame(timeout=0.3)

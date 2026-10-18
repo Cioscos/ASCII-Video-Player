@@ -3,6 +3,7 @@ import logging
 import math
 import multiprocessing
 import queue
+import time
 from collections import deque
 
 # Marker per segnalare la fine del video
@@ -38,13 +39,14 @@ def put_until_stopped(q, item, should_stop, timeout=0.1):
 
 
 def frame_reader_process(video_path, width, height, source_fps, target_fps, frame_queue, should_stop,
-                         batch_size, loop_video):
+                         batch_size, loop_video, rotation=0, start_index=0):
     """
     Processo di lettura: decima i frame sorgente, li ridimensiona e li invia in batch.
 
     Ogni elemento della coda è una lista di (indice_decimato, ndarray ridimensionato
     width x height) oppure END_OF_VIDEO_MARKER. Il loop del video è gestito qui;
-    l'indice decimato riparte da 0 a ogni giro.
+    l'indice decimato riparte da 0 a ogni giro (tranne il primo, che parte da start_index).
+    La rotazione è applicata dopo il ridimensionamento: il risultato è sempre height x width.
 
     Args:
         video_path (str): Percorso del file video
@@ -56,6 +58,8 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
         should_stop (multiprocessing.Event): Evento di terminazione
         batch_size (int): Numero di frame per batch
         loop_video (bool): Se True, riavvia il video alla fine
+        rotation (int): Rotazione oraria in gradi (0, 90, 180, 270)
+        start_index (int): Indice decimato da cui iniziare (posizionamento del video)
     """
     import signal
 
@@ -79,18 +83,31 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
             should_stop.set()
             return
 
+        rotate_code = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                       270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(rotation)
+        # Con 90/270 si ridimensiona già in orientamento ruotato, poi si ruota
+        resize_size = (height, width) if rotation in (90, 270) else (width, height)
+
         batch = []
-        source_index = 0
-        decimated_index = 0
+        source_index = decimator.source_index(start_index)
+        decimated_index = start_index
+        if start_index > 0:
+            logger.info(f"Posizionamento al frame sorgente {source_index} (indice decimato {start_index}), "
+                        f"rotazione {rotation}°")
+            video.set(cv2.CAP_PROP_POS_FRAMES, source_index)
+        elif rotation:
+            logger.info(f"Rotazione {rotation}°")
+        grabbed_in_lap = 0
+        offset_lap = start_index > 0  # il giro corrente non parte da 0
         while not should_stop.is_set():
             if not video.grab():
                 if batch:
                     if not put_until_stopped(frame_queue, batch, should_stop):
                         break
                     batch = []
-                if not loop_video or decimated_index == 0:
+                if not loop_video or (grabbed_in_lap == 0 and not offset_lap):
                     # Fine video senza loop, oppure nessun frame letto in un giro intero
-                    if decimated_index == 0:
+                    if grabbed_in_lap == 0:
                         logger.warning("Nessun frame letto dal video, fine riproduzione")
                     put_until_stopped(frame_queue, END_OF_VIDEO_MARKER, should_stop)
                     logger.info("Fine del video, marker inviato")
@@ -100,8 +117,11 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
                 video = cv2.VideoCapture(video_path)
                 source_index = 0
                 decimated_index = 0
+                grabbed_in_lap = 0
+                offset_lap = False
                 continue
 
+            grabbed_in_lap += 1
             keep = decimator.should_keep(source_index)
             source_index += 1
             if not keep:
@@ -109,7 +129,9 @@ def frame_reader_process(video_path, width, height, source_fps, target_fps, fram
             ok, frame = video.retrieve()
             if not ok:
                 continue
-            resized = cv2.resize(frame, (width, height), interpolation=cv2.INTER_NEAREST)
+            resized = cv2.resize(frame, resize_size, interpolation=cv2.INTER_NEAREST)
+            if rotate_code is not None:
+                resized = cv2.rotate(resized, rotate_code)
             batch.append((decimated_index, resized))
             decimated_index += 1
             if len(batch) >= batch_size:
@@ -205,14 +227,18 @@ class _PipelineFrameSource:
         self._pending = deque()
         self._ended = False
 
-    def next_frame(self):
+    def next_frame(self, timeout=None):
         """
         Restituisce (indice, bytes) oppure None a fine video o con lo stop impostato.
+
+        Se timeout (secondi) è indicato e non arriva alcun frame entro quel tempo,
+        solleva TimeoutError; con None attende finché c'è un frame, la fine o lo stop.
 
         Se il processo di conversione muore senza inviare il marker, imposta lo
         stop e restituisce None invece di attendere per sempre.
         """
         p = self._pipeline
+        deadline = None if timeout is None else time.monotonic() + timeout
         while not self._pending:
             if self._ended or p.should_stop.is_set():
                 return None
@@ -220,6 +246,8 @@ class _PipelineFrameSource:
                 item = p.ascii_queue.get(timeout=_POLL_TIMEOUT)
             except queue.Empty:
                 if p.workers_alive():
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError(f"Nessun frame entro {timeout} s")
                     continue
                 # Ultimo tentativo: i dati potrebbero essere ancora in transito nella pipe
                 try:
@@ -253,7 +281,7 @@ class VideoPipeline:
     """
 
     def __init__(self, video_path, width, height, source_fps, target_fps, batch_size, palette, loop_video,
-                 log_performance=False, truecolor=False):
+                 log_performance=False, truecolor=False, rotation=0, start_index=0):
         """
         Args:
             video_path (str): Percorso del file video
@@ -266,6 +294,8 @@ class VideoPipeline:
             loop_video (bool): Se True, il video riparte alla fine
             log_performance (bool): Se True, il converter logga i tempi di conversione
             truecolor (bool): Se True, colori a 24 bit
+            rotation (int): Rotazione oraria in gradi (0, 90, 180, 270)
+            start_index (int): Indice decimato da cui parte il reader
         """
         from ascii_converter import pixel_rows
         from playback import FrameDecimator
@@ -279,6 +309,8 @@ class VideoPipeline:
         self.loop_video = loop_video
         self.log_performance = log_performance
         self.truecolor = truecolor
+        self.rotation = rotation
+        self.start_index = start_index
         # Righe di pixel che il reader deve produrre (il doppio delle righe di testo con 'half')
         self.resize_height = pixel_rows(height, palette)
         self.effective_fps = FrameDecimator(source_fps, target_fps).effective_fps
@@ -295,14 +327,15 @@ class VideoPipeline:
         self.logger = logging.getLogger('VideoPipeline')
         self.logger.info(
             f"Pipeline: video={video_path}, {width}x{height}, fps effettivi={self.effective_fps}, "
-            f"batch={self.batch_size}, code={queue_size}, loop={loop_video}")
+            f"batch={self.batch_size}, code={queue_size}, loop={loop_video}, "
+            f"rotazione={rotation}, indice iniziale={start_index}")
 
     def start(self):
         """Avvia i processi di lettura e conversione."""
         self.reader_process = multiprocessing.Process(
             target=frame_reader_process,
             args=(self.video_path, self.width, self.resize_height, self.source_fps, self.target_fps,
-                  self.frame_queue, self.should_stop, self.batch_size, self.loop_video),
+                  self.frame_queue, self.should_stop, self.batch_size, self.loop_video, self.rotation, self.start_index),
             daemon=True,
         )
         self.converter_process = multiprocessing.Process(
