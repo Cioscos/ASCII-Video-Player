@@ -14,7 +14,7 @@
 - **Multiple palette di caratteri ASCII** (basic, standard, extended, box, half o custom)
 - **Menu interattivo** (`python main.py` senza argomenti), impostazioni persistenti e gestione della cache
 - **Truecolor a 24 bit** (`--truecolor`) e larghezza automatica dalla dimensione del terminale
-- **Controlli di riproduzione**: pausa, uscita e seek (con `--high-performance`)
+- **Controlli di riproduzione**: pausa, uscita, seek e rotazione (r/R), in entrambe le modalità
 - **Sistema di calibrazione automatico** per adattarsi alle dimensioni del terminale
 - **Monitoraggio performance in tempo reale** con visualizzazione grafica degli FPS
 - **Temporizzazione a scadenze assolute**: ogni frame ha una scadenza fissa; i frame vengono saltati solo quando il disegno resta indietro, così la riproduzione mantiene il ritmo anche su hardware meno potenti
@@ -86,8 +86,9 @@ Il menu ha cinque schermate: **Riproduci** (riproduce il video selezionato), **V
 | `q` o `Esc` | Esci |
 | `Sinistra` / `Destra` | Seek -5 s / +5 s |
 | `Giù` / `Su` | Seek -30 s / +30 s |
+| `r` / `R` | Ruota di 90° in senso orario / antiorario |
 
-Il seek è disponibile solo con `--high-performance`; in modalità standard il player mostra "Seek disponibile solo con --high-performance".
+Seek e rotazione funzionano in entrambe le modalità. Con `--high-performance` a 0° sono immediati (cache); da ruotato, e in modalità standard, il video viene decodificato dal vivo, quindi un seek o una rotazione richiedono circa 1-2 s (nel frattempo compare "Seek…" / "Rotazione N°…"). A 90°/270° la larghezza può ridursi per stare nel terminale.
 
 ### Esempi
 

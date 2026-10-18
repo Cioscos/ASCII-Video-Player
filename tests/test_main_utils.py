@@ -149,3 +149,27 @@ def test_menu_frame_overwrites_in_place_without_clearing():
     frame = main.menu_frame("Pixellator\n> Riproduci")
     assert "\033[2J" not in frame
     assert frame == "\033[HPixellator\033[K\n> Riproduci\033[K\033[J"
+
+
+def test_decimated_total_matches_should_keep():
+    from playback import FrameDecimator
+    d = FrameDecimator(60.0, 25)
+    assert main.decimated_total(1000, 60.0, 25) == sum(d.should_keep(i) for i in range(1000))
+    assert main.decimated_total(0, 60.0, 25) == 0
+    assert main.decimated_total(-5, 60.0, 25) == 0
+
+
+def test_controls_hint_lists_rotation_in_both_modes():
+    assert main.CONTROLS_HINT == main.CONTROLS_HINT_HP
+    assert "r/R ruota" in main.CONTROLS_HINT and "←/→" in main.CONTROLS_HINT
+
+
+def test_pipeline_factory_uses_rotated_dimensions(monkeypatch):
+    from rotation import rotated_dimensions
+    monkeypatch.setattr(main, "get_terminal_size", lambda: (200, 60))
+    args = main.parse_arguments(["v.mp4"])
+    factory = main.make_pipeline_factory(args, 1920, 1080, 30.0, "abc")
+    pipeline = factory(90, 7)
+    assert (pipeline.width, pipeline.height) == rotated_dimensions(1920, 1080, 90, None, 200, 60, 2)
+    assert pipeline.rotation == 90
+    assert pipeline.start_index == 7

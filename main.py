@@ -10,6 +10,7 @@ from ascii_converter import auto_width, compute_ascii_height
 from cache_manager import DEFAULT_LIMIT, enforce_limit, list_caches, parse_size
 from calibration_frame import render_calibration_frame
 from pipeline import VideoPipeline
+from rotation import RotatingSource, rotated_dimensions
 from utils import setup_logging, get_terminal_size
 
 HIDE_CURSOR = '\033[?25l'
@@ -57,10 +58,9 @@ def load_custom_palette(path):
     return palette
 
 
-CONTROLS_HINT_HP = ("Spazio pausa · q/Esc esci · ←/→ ±5 s · "
-                    "↓/↑ ±30 s · Ctrl+C termina")
-CONTROLS_HINT = ("Spazio pausa · q/Esc esci · Ctrl+C termina "
-                 "(seek solo con --high-performance)")
+CONTROLS_HINT = ("Spazio pausa · q/Esc esci · ←/→ ±5 s · "
+                 "↓/↑ ±30 s · r/R ruota · Ctrl+C termina")
+CONTROLS_HINT_HP = CONTROLS_HINT
 
 
 def parse_arguments(argv=None):
@@ -315,6 +315,9 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
         print(f"Liberati {freed:.0f} MB rimuovendo {len(removed_list)} cache (limite {args.cache_limit})")
 
     fps = cached.metadata["effective_fps"]
+    src_h, src_w = video_info[0].shape[:2]
+    source = RotatingSource(make_pipeline_factory(args, src_w, src_h, source_fps, ascii_palette),
+                            len(cached), cache=CachedFrameSource(cached))
     stats = FpsStats(fps) if args.log_fps else None
     audio = None
     exit_code = 0
@@ -332,7 +335,7 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
             if args.audio:
                 audio = _start_audio(args.video_path, fps, logger)
 
-            drawn = run_playback(CachedFrameSource(cached), fps, display, threading.Event(),
+            drawn = run_playback(source, fps, display, threading.Event(),
                                  loop=not args.no_loop, stats=stats, audio=audio, controls=keys)
             logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
         except KeyboardInterrupt:
@@ -341,11 +344,42 @@ def run_high_performance_mode(args, video_info, ascii_dimensions, ascii_palette,
             logger.exception(f"Errore durante la riproduzione: {e}")
             exit_code = 1
         finally:
-            _shutdown(display, logger, audio.stop if audio is not None else None, cached.close)
+            _shutdown(display, logger, source.close, audio.stop if audio is not None else None,
+                      cached.close)
 
     if stats is not None:
         logger.info(stats.summary())
     return exit_code
+
+
+def decimated_total(frame_count, source_fps, target_fps):
+    """Numero di frame tenuti dal decimatore fra i `frame_count` frame sorgente."""
+    if frame_count <= 0:
+        return 0
+    from playback import FrameDecimator
+    decimator = FrameDecimator(source_fps, target_fps)
+    return sum(1 for i in range(int(frame_count)) if decimator.should_keep(i))
+
+
+def make_pipeline_factory(args, src_w, src_h, source_fps, ascii_palette):
+    """
+    Crea la fabbrica di pipeline usata da RotatingSource.
+
+    Le dimensioni sono calcolate a ogni chiamata, perché il terminale può essere
+    stato ridimensionato nel frattempo.
+
+    Returns:
+        Callable[[int, int], VideoPipeline]: (rotazione, indice di partenza) -> pipeline non avviata
+    """
+    def factory(rotation, start_index):
+        width, height = rotated_dimensions(src_w, src_h, rotation, args.width, *get_terminal_size(),
+                                           reserved_rows(args.log_fps))
+        return VideoPipeline(
+            args.video_path, width, height, source_fps, args.fps, args.batch_size, ascii_palette,
+            loop_video=not args.no_loop, log_performance=args.log_performance, truecolor=args.truecolor,
+            rotation=rotation, start_index=start_index
+        )
+    return factory
 
 
 def _open_controls():
@@ -440,18 +474,20 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
     from terminal_display import TerminalDisplay
 
     width, height = ascii_dimensions
-    pipeline = VideoPipeline(
-        args.video_path, width, height, video_info[1], args.fps, args.batch_size, ascii_palette,
-        loop_video=not args.no_loop, log_performance=args.log_performance, truecolor=args.truecolor
-    )
+    from playback import FrameDecimator
+    source_fps = video_info[1]
+    src_h, src_w = video_info[0].shape[:2]
+    effective_fps = FrameDecimator(source_fps, args.fps).effective_fps
+    source = RotatingSource(make_pipeline_factory(args, src_w, src_h, source_fps, ascii_palette),
+                            decimated_total(video_info[2], source_fps, args.fps))
     display = TerminalDisplay()
-    stats = FpsStats(pipeline.effective_fps) if args.log_fps else None
+    stats = FpsStats(effective_fps) if args.log_fps else None
     audio = None
     exit_code = 0
 
     with _open_controls() as keys:
         try:
-            pipeline.start()
+            source.start()
 
             print("\nASCII Video Player avviato!")
             print(CONTROLS_HINT + "\n")
@@ -462,9 +498,9 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
             sys.stdout.flush()
 
             if args.audio:
-                audio = _start_audio(args.video_path, pipeline.effective_fps, logger)
+                audio = _start_audio(args.video_path, effective_fps, logger)
 
-            drawn = run_playback(pipeline.frame_source(), pipeline.effective_fps, display, pipeline.should_stop,
+            drawn = run_playback(source, effective_fps, display, threading.Event(),
                                  loop=False, stats=stats, audio=audio, controls=keys)
             logger.info(f"Riproduzione terminata, frame mostrati: {drawn}")
         except KeyboardInterrupt:
@@ -473,7 +509,7 @@ def run_standard_mode(args, video_info, ascii_dimensions, ascii_palette, logger)
             logger.exception(f"Errore durante la riproduzione: {e}")
             exit_code = 1
         finally:
-            _shutdown(display, logger, pipeline.stop, audio.stop if audio is not None else None)
+            _shutdown(display, logger, source.close, audio.stop if audio is not None else None)
 
     if stats is not None:
         logger.info(stats.summary())
