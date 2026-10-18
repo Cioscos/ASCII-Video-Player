@@ -134,11 +134,14 @@ def seek_target(current: int, delta: int, total: int, loop: bool) -> int:
     Indice di destinazione di un seek di `delta` frame a partire da `current`.
 
     Indietro oltre l'inizio → 0; avanti oltre la fine → 0 con il loop,
-    altrimenti l'ultimo frame.
+    altrimenti l'ultimo frame. Con `total <= 0` (numero di frame sconosciuto)
+    il seek in avanti non ha limite superiore.
     """
     target = current + delta
     if target < 0:
         return 0
+    if total <= 0:
+        return target
     if target >= total:
         return 0 if loop else total - 1
     return target

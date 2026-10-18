@@ -437,3 +437,24 @@ def test_source_index_inverts_should_keep(src, target):
     d = FrameDecimator(src, target)
     kept = [s for s in range(300) if d.should_keep(s)]
     assert [d.source_index(i) for i in range(len(kept))] == kept
+
+
+class UnknownLengthSource(SeekableListSource):
+    """Sorgente con seek ma numero di frame sconosciuto (len 0)."""
+
+    def __len__(self):
+        return 0
+
+
+def test_seek_target_unknown_total_has_no_upper_bound():
+    assert seek_target(10, 50, 0, False) == 60 and seek_target(10, 50, 0, True) == 60
+    assert seek_target(3, -50, 0, True) == 0 and seek_target(3, -50, -1, False) == 0
+
+
+def test_seek_with_unknown_length_moves_forward_and_clamps_at_zero():
+    ft = FakeTime()
+    d = RecordingDisplay()
+    keys = FakeKeys({4: "right", 6: "down"})
+    run_playback(UnknownLengthSource(make(100)), 10, d, threading.Event(), loop=False,
+                 clock=make_clock(10, ft), controls=keys)
+    assert d.drawn[:7] == [0, 1, 2, 52, 53, 0, 1]
